@@ -252,12 +252,15 @@ def publish(judged, dry_run):
 
 
 def checks_green(row):
+    latest = {}
     for item in row.get("statusCheckRollup") or []:
-        if not isinstance(item, dict) or (item.get("name") or item.get("context")) == MERGE_CONTEXT:
+        name = (item.get("name") or item.get("context") or "") if isinstance(item, dict) else ""
+        if not name or name == MERGE_CONTEXT:
             continue
-        if (item.get("conclusion") or item.get("state") or "").upper() not in ("SUCCESS", "NEUTRAL", "SKIPPED"):
-            return False
-    return True
+        moment = next((str(item[key]) for key in ("completedAt", "startedAt", "createdAt") if item.get(key) and not str(item[key]).startswith("0001")), "")
+        if name not in latest or moment >= latest[name][0]:
+            latest[name] = (moment, (item.get("conclusion") or item.get("state") or "").upper())
+    return all(result in ("SUCCESS", "NEUTRAL", "SKIPPED") for _, result in latest.values())
 
 
 def serialize(judged, armed, green):

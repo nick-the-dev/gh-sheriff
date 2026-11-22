@@ -276,6 +276,18 @@ class SerialMergeTests(unittest.TestCase):
         self.assertEqual(posted[2][0], "success")
         self.assertEqual(posted[3], ("pending", "one merge per deploy: waiting for #2"))
 
+    def test_an_older_failed_run_of_a_check_does_not_count_against_a_newer_success(self):
+        rollup = [{"__typename": "CheckRun", "name": "CI Policy", "conclusion": "CANCELLED", "startedAt": "2026-11-22T10:00:00Z",
+                   "completedAt": "2026-11-22T10:01:00Z"},
+                  {"__typename": "CheckRun", "name": "CI Policy", "conclusion": "SUCCESS", "startedAt": "2026-11-22T10:05:00Z",
+                   "completedAt": "2026-11-22T10:06:00Z"}]
+        self.assertTrue(status.checks_green({"statusCheckRollup": rollup}))
+        self.assertTrue(status.checks_green({"statusCheckRollup": rollup[::-1]}))
+        self.assertFalse(status.checks_green({"statusCheckRollup": [rollup[1], dict(rollup[0], completedAt="2026-11-22T10:09:00Z")]}))
+        running = {"name": "Review", "status": "IN_PROGRESS", "conclusion": "", "startedAt": "2026-11-22T10:07:00Z",
+                   "completedAt": "0001-01-01T00:00:00Z"}
+        self.assertFalse(status.checks_green({"statusCheckRollup": [rollup[1], running]}))
+
     def test_disarming_the_leader_releases_the_next_armed_pull_request(self):
         code, posted, _ = self.run_main(["--pr", "2"], [row(2, False), row(3, True), row(4, True)])
         self.assertEqual([posted[2][0], posted[3][0], posted[4][0]], ["success", "success", "pending"])
