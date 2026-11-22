@@ -127,7 +127,14 @@ class PlanWiringTests(unittest.TestCase):
         self.assertNotIn("GH_TOKEN", step)
         self.assertIn("persist-credentials: false", action)
         self.assertIn("find base -type l -delete", action)
-        self.assertLess(action.index("rm -rf plan"), action.index("plan.py\" prepare"))
+
+    def test_a_persistent_workspace_is_cleared_before_any_checkout_or_prepare(self):
+        for name, cleanup, prepare in (("plan", "rm -rf pr review plan", "plan.py\" prepare"), ("review", "rm -rf review plan", "review.py\" prepare")):
+            action = (ROOT / "actions" / name / "action.yml").read_text()
+            with self.subTest(action=name):
+                self.assertIn(cleanup, run_blocks(action))
+                self.assertLess(action.index("run: " + cleanup), action.index("uses: actions/checkout@"))
+                self.assertLess(action.index("run: " + cleanup), action.index(prepare))
 
     def test_the_plan_action_takes_the_ack_list_as_an_input_through_env(self):
         action = (ROOT / "actions/plan/action.yml").read_text()

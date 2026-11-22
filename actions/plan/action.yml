@@ -41,6 +41,9 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Clear an earlier job's pull request checkout, review and plan files (a persistent workspace keeps them)
+      shell: bash
+      run: rm -rf pr review plan
     - name: Check out the default branch for the code and the project's rules
       uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       with:
@@ -48,11 +51,9 @@ runs:
         path: base
         fetch-depth: 1
         persist-credentials: false
-    - name: Remove symbolic links from the checkout and an earlier run's plan files
+    - name: Remove symbolic links from the checkout
       shell: bash
-      run: |
-        find base -type l -delete
-        rm -rf plan
+      run: find base -type l -delete
     - name: Prepare the plan input
       id: prepare
       shell: bash

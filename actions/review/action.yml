@@ -56,6 +56,9 @@ outputs:
 runs:
   using: composite
   steps:
+    - name: Clear an earlier job's review and plan files (a persistent workspace keeps them)
+      shell: bash
+      run: rm -rf review plan
     - name: Check out the pull request head as data
       uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       with:
