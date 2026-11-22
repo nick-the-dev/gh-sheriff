@@ -56,26 +56,25 @@ see. The verdict is a check run that only Sheriff's App can write. A no-bypass r
 ## How it works
 
 ```mermaid
-flowchart LR
-    A["Agent pushes<br/>a pull request"] --> B["Cheap AI<br/>review"]
-    B -->|clean| C["Smart AI<br/>review"]
-    C -->|clean| D["Merge gate<br/>comments answered,<br/>production healthy"]
-    D --> E["GitHub<br/>merges it"]
-    E --> F["Your deploy<br/>ships it"]
-    F --> G["Task marked<br/>Verified"]
-    B -->|problem| X["Agent fixes it<br/>and pushes again"]
+flowchart TD
+    A["Agent pushes a pull request"] --> B["1. Cheap AI review"]
+    B -->|clean| C["2. Smart AI review"]
+    B -->|problem| X["Agent fixes it and pushes again"]
     C -->|problem| X
     X --> A
+    C -->|clean| D["3. Merge gate: comments answered, production healthy"]
+    D --> E["4. GitHub merges it"]
+    E --> F["5. Your deploy ships it, the task is marked Verified"]
 ```
 
-1. **Record the round.** Before any AI runs, Sheriff counts the round, so a cancelled or re-run review still uses up
-   budget.
-2. **Cheap review.** A low-cost model reviews the change. Docs-only changes stop here.
-3. **Smart review.** Only a clean cheap review reaches the smart model, Claude Opus by default.
-4. **Merge gate.** Every comment from a person has an agent's answer, and production is healthy (if you configured it).
-5. **Merge.** GitHub merges the pull request the moment both are green. Nobody can bypass this, admins included.
-6. **Deploy.** Your own deploy workflow runs as usual.
-7. **Work state.** The task's issue moves on its own and closes when it is verified.
+1. **Cheap review.** A low-cost model reviews every new push. Docs-only changes stop here.
+2. **Smart review.** Only a clean cheap review reaches the smart model, Claude Opus by default.
+3. **Merge gate.** Every comment from a person needs an agent's answer, and production must be healthy (if you
+   configured it).
+4. **Merge.** GitHub merges the pull request as soon as everything is green. Nobody can bypass this, admins included.
+5. **Ship and verify.** Your deploy runs as usual, and the task's issue moves to Released, then Verified.
+
+Each review round is counted before the AI starts. Cancelling or re-running a review never buys an extra attempt.
 
 Under the hood:
 
