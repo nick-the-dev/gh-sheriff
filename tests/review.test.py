@@ -337,6 +337,12 @@ class ReserveTests(unittest.TestCase):
         keyed = dict(bare, external_id=BASE + "/plan-1")
         self.assertEqual(self.reserve(checks=[keyed], **with_plan)[1][-1]["skip"], "already reviewed at this head and base")
 
+    def test_planning_asks_the_pull_request_for_its_closing_issues(self):
+        code, outs, gh, writes = self.reserve(extra=("--plan", "on"), **WITH_PLAN)
+        fields = next(args[args.index("--json") + 1] for args in gh if args[:2] == ["pr", "view"])
+        self.assertIn("closingIssuesReferences", fields.split(","))
+        self.assertIn("title", fields.split(","))
+
     def test_without_planning_no_issue_is_read(self):
         code, outs, gh, writes = self.reserve(reviews=[gate(marker("first"))])
         self.assertFalse(any("issue(number:" in " ".join(args) for args in gh))
@@ -539,6 +545,8 @@ class PromptTests(unittest.TestCase):
         self.assertIn("review/plan.md", text)
         self.assertIn("Check the change against the plan. A different approach, files outside the plan's scope or missing planned tests without a replan is BLOCKING.", text)
         self.assertIn("so is code made hard to read to save lines", text)
+        self.assertIn("Only when `review/plan.md` is present: Check the change against the plan.", text)
+        self.assertIn("A demonstrated departure from `review/plan.md` without a replan", text)
 
 
 if __name__ == "__main__":

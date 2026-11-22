@@ -21,12 +21,13 @@ Review for correctness and security:
 3. Security: injection, secrets in code, logs or output, authorization gaps, unsafe use of untrusted input,
    privilege escalation in workflows (which events run with which token, which ref is checked out).
 4. Tests: does a test exercise the new behaviour, and would it fail without the change?
-5. Check the change against the plan. A different approach, files outside the plan's scope or missing planned tests without a replan is BLOCKING. A diff clearly larger than the plan needs (unplanned refactors, extra features, unrelated files) is a finding; so is code made hard to read to save lines.
-6. Minimal change, with or without a plan: a change should be the smallest diff that solves its task and still reads
+5. Only when `review/plan.md` is present: Check the change against the plan. A different approach, files outside the plan's scope or missing planned tests without a replan is BLOCKING. A diff clearly larger than the plan needs (unplanned refactors, extra features, unrelated files) is a finding; so is code made hard to read to save lines.
+6. Minimal change, whether or not a plan exists: a change should be the smallest diff that solves its task and still reads
    clearly. Unplanned refactors, speculative options and compressed code are findings.
 
 A finding blocks only if it is a real defect you can demonstrate: name the file and line, the input or situation,
-and the wrong outcome. Style, naming and preferences never block; list them as advisory. Do not invent problems to
+and the wrong outcome. A demonstrated departure from `review/plan.md` without a replan (point 5) also blocks; name the file and the plan
+section it departs from. Style, naming and preferences never block; list them as advisory. Do not invent problems to
 seem thorough, and do not stop at the first finding.
 
 Write your review as a short summary, then numbered findings marked BLOCKING or ADVISORY with `path:line`. Your very
