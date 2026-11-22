@@ -245,8 +245,12 @@ class PlanGateTests(unittest.TestCase):
         self.assertTrue(description.endswith("; no plan needed (sheriff:no-plan)"))
         self.assertEqual(self.judge(plan=None, labels=["sheriff:no-plan"], labeled_by="boss")[0], "pending")
 
+    def test_a_label_applied_by_a_bot_is_ignored(self):
+        state, description, _ = self.judge(plan=None, labels=["sheriff:no-plan"], labeled_by="app[bot]")
+        self.assertEqual((state, description), ("pending", "needs a Sheriff plan on #12"))
+
     def test_a_labeler_whose_permission_cannot_be_read_is_ignored(self):
-        state, description, _ = self.judge(plan=None, labels=["sheriff:no-plan"], labeled_by="app[bot]", no_permission=("app[bot]",))
+        state, description, _ = self.judge(plan=None, labels=["sheriff:no-plan"], labeled_by="ghost", no_permission=("ghost",))
         self.assertEqual((state, description), ("pending", "needs a Sheriff plan on #12"))
 
     def test_a_task_issue_found_by_the_pull_request_title(self):
