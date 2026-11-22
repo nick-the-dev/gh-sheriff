@@ -75,6 +75,10 @@ runs:
       run: |
         python3 -I "$SHERIFF/scripts/review.py" prepare --pr "$PR" --checkout pr --out review --default-branch "$DEFAULT_BRANCH" \
           --head "$HEAD_SHA" --base "$BASE_SHA"
+    - name: Set up Node.js for the reviewer CLIs (self-hosted runners may not have it)
+      uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      with:
+        node-version: 22
     - name: Review (cheap first pass, then the final reviewer; read-only, no shell)
       id: verdict
       if: steps.prepare.outputs.skip == ''
