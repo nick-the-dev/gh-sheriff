@@ -144,6 +144,12 @@ class FactsTests(unittest.TestCase):
         fetch = mock.Mock(side_effect=AssertionError("nothing to read"))
         self.assertIsNone(plan.task_issue({"title": "Install Sheriff", "closingIssuesReferences": []}, "o/r", fetch))
 
+    def test_the_planning_switch_is_on_for_on_in_any_case_like_the_workflow_condition(self):
+        for value in ("on", "ON", " On "):
+            self.assertTrue(plan.planning_on(value), value)
+        for value in ("off", "", None, "true", "1", "only"):
+            self.assertFalse(plan.planning_on(value), value)
+
     def test_review_keys_bind_the_plan_version(self):
         self.assertEqual(plan.review_key(BASE, 0), BASE)
         self.assertEqual(plan.review_key(BASE, 2), BASE + "/plan-2")

@@ -162,18 +162,17 @@ class PlanWiringTests(unittest.TestCase):
         name = re.search(r"\n\s+(\w+): \$\{\{ github\.event\.action \}\}\n", action).group(1)
         self.assertIn('--event "$' + name + '"', action)
 
-    def test_the_plan_jobs_share_one_per_issue_concurrency_group_and_never_cancel(self):
-        groups = set()
-        for job in ("plan-reserve", "plan", "plan-post"):
-            text = block(TEMPLATE, job)
+    def test_only_reservations_queue_per_issue_and_later_comments_never_cancel_a_plan_run(self):
+        reserve = block(TEMPLATE, "plan-reserve")
+        self.assertEqual(re.findall(r"\n      group: (.+)\n", reserve), ["sheriff-plan-${{ github.event.issue.number || inputs.plan_issue }}"])
+        self.assertIn("\n      cancel-in-progress: false\n", reserve)
+        for job in ("plan", "plan-post"):
             with self.subTest(job=job):
-                groups.update(re.findall(r"\n      group: (.+)\n", text))
-                self.assertIn("\n      cancel-in-progress: false\n", text)
-        self.assertEqual(groups, {"sheriff-plan-${{ github.event.issue.number || inputs.plan_issue }}"})
+                self.assertNotIn("concurrency:", block(TEMPLATE, job))
 
     def test_every_reservation_is_released_even_after_a_failed_timed_out_or_cancelled_plan(self):
         text = block(TEMPLATE, "plan-post")
-        condition = text[text.index("\n    if:"):text.index("\n    concurrency:")]
+        condition = text[text.index("\n    if:"):text.index("\n    runs-on:")]
         for part in ("always()", "needs.plan-reserve.result == 'success'", "needs.plan-reserve.outputs.skip == ''"):
             self.assertIn(part, condition)
         self.assertNotIn("needs.plan.", condition)

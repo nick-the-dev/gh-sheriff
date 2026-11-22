@@ -170,7 +170,7 @@ class PlanGateTests(unittest.TestCase):
     ROLES = {"chief": "admin", "boss": "maintain"}
 
     def judge(self, plan_on=True, plan=1, plan_author="gate", reviewed_keys=(), created="2026-11-22T10:00:00Z",
-              title="fix(x): y (LOGIN-FIX)", refs=None, labels=(), labeled_by="", comments=(), listing=(), no_permission=()):
+              title="fix(x): y (LOGIN-FIX)", refs=None, labels=(), labeled_by="", comments=(), listing=(), no_permission=(), switch=None):
         reads = []
         refs = [{"number": 12, "repository": {"owner": {"login": "o"}, "name": "r"}}] if refs is None else refs
         view = {"state": "OPEN", "headRefOid": HEAD, "baseRefName": "main", "title": title, "createdAt": created,
@@ -208,7 +208,7 @@ class PlanGateTests(unittest.TestCase):
         def fake_pages(path):
             return events if path.endswith("/events") else list(comments)
 
-        env = {"GH_REPO": "o/r", "GH_ACTOR_LOGIN": "gate[bot]", "SHERIFF_PLAN": "on" if plan_on else "",
+        env = {"GH_REPO": "o/r", "GH_ACTOR_LOGIN": "gate[bot]", "SHERIFF_PLAN": switch if switch is not None else "on" if plan_on else "",
                "SHERIFF_PLAN_SINCE": "2026-11-22T00:00:00Z"}
         with mock.patch.object(status, "gh_json", side_effect=fake_gh_json), \
              mock.patch.object(status, "gh_pages", side_effect=fake_pages), \
@@ -220,6 +220,12 @@ class PlanGateTests(unittest.TestCase):
         state, description, reads = self.judge(plan_on=False, plan=None)
         self.assertEqual(state, "success")
         self.assertEqual(reads, [])
+
+    def test_the_plan_switch_ignores_case_like_the_workflow_condition(self):
+        for value in ("ON", " On "):
+            with self.subTest(value=value):
+                self.assertEqual(self.judge(plan=None, switch=value)[:2], ("pending", "needs a Sheriff plan on #12"))
+        self.assertEqual(self.judge(plan=None, switch="off")[0], "success")
 
     def test_a_task_pull_request_without_a_plan_is_pending_with_the_issue_number(self):
         self.assertEqual(self.judge(plan=None)[:2], ("pending", "needs a Sheriff plan on #12"))

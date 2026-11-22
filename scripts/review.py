@@ -220,7 +220,7 @@ def reserve(args):
     login = os.environ.get("GH_ACTOR_LOGIN", "").strip()
     if not login:
         raise ReviewError("GH_ACTOR_LOGIN is not set: run review.py reserve through app-token.py as the gate App")
-    slug, planning = bare(login), args.plan == "on"
+    slug, planning = bare(login), planner.planning_on(args.plan)
     empty = {"head": "", "base": "", "review_id": "", "counts": "", "plan_issue": 0, "plan_version": 0, "app": slug}
     view = gh_json(["pr", "view", str(args.pr), "--json", "state,isDraft,baseRefName,headRefOid" + (",title,closingIssuesReferences" if planning else "")])
     if str(view.get("state") or "").upper() != "OPEN":

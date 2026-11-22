@@ -349,6 +349,10 @@ class ReserveTests(unittest.TestCase):
         self.assertFalse(any("closingIssuesReferences" in " ".join(args) for args in gh))
         self.assertEqual((outs[-1]["plan_issue"], outs[-1]["plan_version"], outs[-1]["app"]), (0, 0, "gate"))
 
+    def test_the_plan_switch_ignores_case_like_the_workflow_condition(self):
+        code, outs, gh, writes = self.reserve(extra=("--plan", "ON"), **WITH_PLAN)
+        self.assertEqual((code, outs[-1]["plan_issue"], outs[-1]["plan_version"]), (0, 12, 1))
+
     def test_plan_off_is_the_same_as_no_plan(self):
         for value in ("off", ""):
             with self.subTest(value=value):

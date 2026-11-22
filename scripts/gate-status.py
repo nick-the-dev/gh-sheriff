@@ -258,7 +258,7 @@ def plan_reviewed(head, slug, version):
 
 
 def plan_gate(number, view, slug):
-    if setting("SHERIFF_PLAN") != "on":
+    if not planner.planning_on(setting("SHERIFF_PLAN")):
         return "", ""
     since, opened = parse_time(setting("SHERIFF_PLAN_SINCE")), parse_time(view.get("createdAt"))
     if since is not None and opened is not None and opened < since:

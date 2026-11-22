@@ -185,6 +185,10 @@ def linked_prs(number, task, rows, repo):
                   if number in closing(row.get("closingIssuesReferences"), repo) or (row.get("title") or "").endswith("(" + task + ")"))
 
 
+def planning_on(value):
+    return str(value or "").strip().lower() == "on"
+
+
 def review_key(base, version):
     return base + KEY_SEPARATOR + str(version) if version else base
 
