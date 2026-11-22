@@ -1,0 +1,112 @@
+name: Sheriff plan post
+description: Turn the plan reservation into the plan or a failure note as the gate App, refresh and re-review the linked pull requests, and start a new plan run for a command that arrived meanwhile.
+inputs:
+  issue:
+    description: Issue number
+    required: true
+  version:
+    description: The plan version the plan-reserve job reserved
+    required: true
+  comment-id:
+    description: The reservation comment to turn into the plan or a failure note
+    required: true
+  rounds:
+    description: Plans per issue before a maintainer must allow one more (the plan-reserve job's value)
+    required: false
+    default: "3"
+  ack-authors:
+    description: Logins besides bots, maintainers and admins whose plan commands are trusted (the plan-reserve job's value)
+    required: false
+    default: ""
+  unlock-authors:
+    description: Logins whose /sheriff plan comment allows one more plan after the budget (the plan-reserve job's value)
+    required: false
+    default: ""
+  app-id:
+    description: The Sheriff gate App id
+    required: true
+  app-key:
+    description: The Sheriff gate App private key, base64
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Clear an earlier run's plan files (the artifact is the only record)
+      shell: bash
+      run: rm -rf plan
+    - name: Fetch the plan
+      continue-on-error: true
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      with:
+        name: sheriff-plan
+        path: plan
+    - name: Post the plan or a failure note as the gate App
+      id: post
+      shell: bash
+      env:
+        GH_REPO: ${{ github.repository }}
+        AGENT_APP_ID: ${{ inputs.app-id }}
+        AGENT_APP_KEY_B64: ${{ inputs.app-key }}
+        ISSUE: ${{ inputs.issue }}
+        VERSION: ${{ inputs.version }}
+        COMMENT_ID: ${{ inputs.comment-id }}
+        SHERIFF: ${{ github.action_path }}/../..
+      run: |
+        set -euo pipefail
+        python3 -I "$SHERIFF/scripts/app-token.py" --repo "$GH_REPO" --permission issues=write --permission pull_requests=read --permission contents=read -- \
+          python3 -I "$SHERIFF/scripts/plan.py" post --record plan/plan.json --issue "$ISSUE" --version "$VERSION" --comment-id "$COMMENT_ID"
+    - name: Refresh the gate and re-review each linked pull request against the new plan
+      if: steps.post.outputs.posted == 'true' && steps.post.outputs.prs != ''
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        GH_REPO: ${{ github.repository }}
+        AGENT_APP_ID: ${{ inputs.app-id }}
+        AGENT_APP_KEY_B64: ${{ inputs.app-key }}
+        PRS: ${{ steps.post.outputs.prs }}
+        SHERIFF: ${{ github.action_path }}/../..
+        SHERIFF_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      run: |
+        set -euo pipefail
+        numbers=()
+        args=()
+        for n in $PRS; do
+          [[ "$n" =~ ^[0-9]+$ ]] || continue
+          numbers+=("$n")
+          args+=(--pr "$n")
+        done
+        [ "${#numbers[@]}" -gt 0 ] || exit 0
+        python3 -I "$SHERIFF/scripts/app-token.py" --repo "$GH_REPO" --permission statuses=write --permission contents=read \
+          --permission pull_requests=read --permission issues=read --permission actions=read --permission checks=read -- \
+          python3 -I "$SHERIFF/scripts/gate-status.py" "${args[@]}"
+        for n in "${numbers[@]}"; do
+          gh workflow run sheriff.yml --repo "$GH_REPO" --ref "$DEFAULT_BRANCH" -f pr="$n" -f review=true
+        done
+    - name: Recheck the issue for a plan command that arrived while this plan was written
+      id: decide
+      if: "!cancelled()"
+      shell: bash
+      env:
+        GH_REPO: ${{ github.repository }}
+        AGENT_APP_ID: ${{ inputs.app-id }}
+        AGENT_APP_KEY_B64: ${{ inputs.app-key }}
+        ISSUE: ${{ inputs.issue }}
+        ROUNDS: ${{ inputs.rounds }}
+        SHERIFF_ACK_AUTHORS: ${{ inputs.ack-authors }}
+        UNLOCKERS: ${{ inputs.unlock-authors }}
+        SHERIFF: ${{ github.action_path }}/../..
+      run: |
+        set -euo pipefail
+        python3 -I "$SHERIFF/scripts/app-token.py" --repo "$GH_REPO" --permission issues=read --permission contents=read -- \
+          python3 -I "$SHERIFF/scripts/plan.py" decide --issue "$ISSUE" --rounds "$ROUNDS" --ack-authors "$SHERIFF_ACK_AUTHORS" \
+          --unlock-authors "$UNLOCKERS"
+    - name: Start a new plan run so that command is answered
+      if: "!cancelled() && (steps.decide.outputs.action == 'plan' || steps.decide.outputs.action == 'budget')"
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        GH_REPO: ${{ github.repository }}
+        ISSUE: ${{ inputs.issue }}
+        DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      run: gh workflow run sheriff.yml --repo "$GH_REPO" --ref "$DEFAULT_BRANCH" -f plan_issue="$ISSUE"

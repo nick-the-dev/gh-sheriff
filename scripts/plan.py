@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Sheriff plan: the facts the planner shares, namely the comment markers, an issue read with its comments, the
 App's current plan on a task issue, the task issue of a pull request, the pull requests linked to an issue and the
-review keys that bind a review to a plan version; who may ask for a plan, the budget, and the reservation comment
-that the gate App posts before any model runs; and writing the plan: the issue prepared as data, the read-only model
-run, and the post that turns the reservation into the plan or a failure note and marks the old version superseded."""
+review keys that bind a review to a plan version; who may ask for a plan, the budget, the reservation comment that
+the gate App posts before any model runs, and the same decision rechecked after a post for a command that arrived
+meanwhile; and writing the plan: the issue prepared as data, the read-only model run, and the post that turns the
+reservation into the plan or a failure note and marks the old version superseded."""
 import argparse
 import datetime
 import importlib.util
@@ -371,6 +372,18 @@ def reserve(args):
     return output(skip="", version=version, comment_id=comment_id, request=request, app=slug)
 
 
+def recheck(args):
+    login = os.environ.get("GH_ACTOR_LOGIN", "").strip()
+    if not login:
+        raise PlanError("GH_ACTOR_LOGIN is not set: run plan.py decide through app-token.py as the gate App")
+    issue = read_issue(args.issue, gh_json)
+    if issue is None:
+        return output(action="skip", why="issue not found")
+    decided = decide(issue, bare(login), make_role(), logins(args.ack_authors), logins(args.unlock_authors), args.rounds,
+                     datetime.datetime.now(datetime.timezone.utc))
+    return output(action=decided["action"], why=decided["why"])
+
+
 def write_json(path, value):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, indent=2))
@@ -498,6 +511,11 @@ def main(argv=None):
     r.add_argument("--ack-authors", default="")
     r.add_argument("--unlock-authors", default="")
     r.add_argument("--event", default="")
+    d = sub.add_parser("decide")
+    d.add_argument("--issue", type=int, required=True)
+    d.add_argument("--rounds", type=int, default=3)
+    d.add_argument("--ack-authors", default="")
+    d.add_argument("--unlock-authors", default="")
     q = sub.add_parser("prepare")
     q.add_argument("--issue", type=int, required=True)
     q.add_argument("--request", required=True)
@@ -523,7 +541,7 @@ def main(argv=None):
     s.add_argument("--comment-id", required=True)
     args = parser.parse_args(argv)
     try:
-        {"reserve": reserve, "prepare": prepare, "run": run_plan, "post": post}[args.command](args)
+        {"reserve": reserve, "decide": recheck, "prepare": prepare, "run": run_plan, "post": post}[args.command](args)
     except (PlanError, reviewers.ReviewerError) as exc:
         print(json.dumps({"ok": False, "error": str(exc)}), file=sys.stderr, flush=True)
         return 1

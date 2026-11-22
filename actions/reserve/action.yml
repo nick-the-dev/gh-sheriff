@@ -24,6 +24,10 @@ inputs:
     description: Logins besides maintainers and admins whose /sheriff review comment allows one more final review
     required: false
     default: ""
+  plan:
+    description: on to key the round to the current Sheriff plan on the task issue; anything else leaves planning off
+    required: false
+    default: ""
   app-id:
     description: The Sheriff gate App id
     required: true
@@ -49,6 +53,15 @@ outputs:
   attempt:
     description: The workflow run attempt that made the reservation; later attempts of the same run do not review
     value: ${{ github.run_attempt }}
+  plan_issue:
+    description: The task issue whose current plan the round is keyed to (0 when none)
+    value: ${{ steps.reserve.outputs.plan_issue }}
+  plan_version:
+    description: The plan version the round is keyed to (0 when none)
+    value: ${{ steps.reserve.outputs.plan_version }}
+  app:
+    description: The gate App's slug
+    value: ${{ steps.reserve.outputs.app }}
 runs:
   using: composite
   steps:
@@ -65,6 +78,7 @@ runs:
         FIRST_ROUNDS: ${{ inputs.first-rounds }}
         FINAL_ROUNDS: ${{ inputs.final-rounds }}
         UNLOCKERS: ${{ inputs.unlock-authors }}
+        PLAN: ${{ inputs.plan }}
         SHERIFF: ${{ github.action_path }}/../..
         SHERIFF_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
       run: |
@@ -76,4 +90,4 @@ runs:
         python3 -I "$SHERIFF/scripts/app-token.py" --repo "$GH_REPO" --permission pull_requests=write --permission checks=write --permission statuses=write \
           --permission issues=read --permission contents=read --permission actions=read -- \
           python3 -I "$SHERIFF/scripts/review.py" reserve --pr "$PR" --default-branch "$SHERIFF_DEFAULT_BRANCH" --first-pass "$FIRST_PASS" \
-          --final "$FINAL" --first-rounds "$FIRST_ROUNDS" --final-rounds "$FINAL_ROUNDS" --unlock-authors "$UNLOCKERS"
+          --final "$FINAL" --first-rounds "$FIRST_ROUNDS" --final-rounds "$FINAL_ROUNDS" --unlock-authors "$UNLOCKERS" --plan "$PLAN"

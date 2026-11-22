@@ -54,8 +54,8 @@ class PortableTests(unittest.TestCase):
 
     def test_the_scan_covers_every_kind_of_file(self):
         names = {p.relative_to(ROOT).as_posix() for p in FILES}
-        self.assertTrue({"scripts/gate-status.py", "scripts/work.py", "actions/review/action.yml", "actions/state/action.yml",
-                         ".github/workflows/gate.yml", ".github/workflows/state.yml", "templates/sheriff.yml"} <= names)
+        self.assertTrue({"scripts/gate-status.py", "scripts/work.py", "scripts/plan.py", "actions/review/action.yml", "actions/state/action.yml",
+                         "actions/plan/action.yml", ".github/workflows/gate.yml", ".github/workflows/state.yml", "templates/sheriff.yml"} <= names)
 
 
 if __name__ == "__main__":

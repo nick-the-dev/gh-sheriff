@@ -1,0 +1,99 @@
+name: Sheriff plan
+description: Write the plan for one task issue from the default branch, read-only, and save it as an artifact for the posting job.
+inputs:
+  issue:
+    description: Issue number
+    required: true
+  request:
+    description: The reservation's request (version, replan reason and requester) as JSON from the plan-reserve job
+    required: true
+  app:
+    description: The gate App's slug from the plan-reserve job
+    required: true
+  ack-authors:
+    description: Logins besides bots, maintainers and admins whose comments reach the planner, comma-separated
+    required: false
+    default: ""
+  model:
+    description: Planner as provider:model (a bare model means Claude)
+    required: false
+    default: claude:claude-opus-5-5
+  turns:
+    description: Turn budget of the planner
+    required: false
+    default: "40"
+  web:
+    description: Web tools for a Claude planner, search, allowlist or any
+    required: false
+    default: search
+  fetch-domains:
+    description: Domains WebFetch may read when web is allowlist, comma-separated
+    required: false
+    default: ""
+  claude-token:
+    description: Claude Code OAuth token from claude setup-token (for a claude planner)
+    required: false
+    default: ""
+  opencode-key:
+    description: OpenCode API key (for an opencode planner)
+    required: false
+    default: ""
+runs:
+  using: composite
+  steps:
+    - name: Check out the default branch for the code and the project's rules
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        ref: ${{ github.event.repository.default_branch }}
+        path: base
+        fetch-depth: 1
+        persist-credentials: false
+    - name: Remove symbolic links from the checkout and an earlier run's plan files
+      shell: bash
+      run: |
+        find base -type l -delete
+        rm -rf plan
+    - name: Prepare the plan input
+      id: prepare
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        GH_REPO: ${{ github.repository }}
+        ISSUE: ${{ inputs.issue }}
+        REQUEST: ${{ inputs.request }}
+        APP: ${{ inputs.app }}
+        SHERIFF_ACK_AUTHORS: ${{ inputs.ack-authors }}
+        SHERIFF: ${{ github.action_path }}/../..
+      run: |
+        python3 -I "$SHERIFF/scripts/plan.py" prepare --issue "$ISSUE" --request "$REQUEST" --app "$APP" \
+          --ack-authors "$SHERIFF_ACK_AUTHORS" --checkout base --out plan
+    - name: Set up Node.js for the planner CLIs (self-hosted runners may not have it)
+      uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      with:
+        node-version: 22
+    - name: Plan (read-only, no shell; web tools only as SHERIFF_PLAN_WEB grants)
+      if: steps.prepare.outputs.skip == ''
+      shell: bash
+      env:
+        CLAUDE_CODE_OAUTH_TOKEN: ${{ inputs.claude-token }}
+        OPENCODE_API_KEY: ${{ inputs.opencode-key }}
+        ISSUE: ${{ inputs.issue }}
+        REQUEST: ${{ inputs.request }}
+        BASE_SHA: ${{ steps.prepare.outputs.base }}
+        MODEL: ${{ inputs.model }}
+        TURNS: ${{ inputs.turns }}
+        WEB: ${{ inputs.web }}
+        FETCH_DOMAINS: ${{ inputs.fetch-domains }}
+        SHERIFF: ${{ github.action_path }}/../..
+      run: |
+        python3 -I "$SHERIFF/scripts/plan.py" run --issue "$ISSUE" --request "$REQUEST" --base "$BASE_SHA" --workdir . \
+          --prompt "$SHERIFF/prompts/plan.md" --model "$MODEL" --turns "$TURNS" --web "$WEB" --fetch-domains "$FETCH_DOMAINS" \
+          --out plan/plan.json
+    - name: Keep the plan for the posting job
+      if: always()
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: sheriff-plan
+        path: plan/plan.json
+        retention-days: 7
+        if-no-files-found: ignore

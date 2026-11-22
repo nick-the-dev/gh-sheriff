@@ -313,6 +313,36 @@ class ReserveTests(unittest.TestCase):
         self.assertEqual(self.reserve(task(), login="")[0], 1)
 
 
+class RecheckTests(unittest.TestCase):
+    def recheck(self, issue, login=APP + "[bot]"):
+        outs = []
+
+        def fake(args):
+            if "/permission" in args[-1]:
+                return {"role_name": ROLES.get(args[-1].split("/")[-2], "write")}
+            raise AssertionError(args)
+        with mock.patch.object(plan, "read_issue", return_value=issue), mock.patch.object(plan, "gh_json", side_effect=fake), \
+             mock.patch.object(plan, "output", side_effect=lambda **values: outs.append(values)), mock.patch("sys.stderr"), \
+             mock.patch.dict(os.environ, {"GH_REPO": "o/r", "GH_ACTOR_LOGIN": login}):
+            code = plan.main(["decide", "--issue", "12", "--rounds", "3", "--ack-authors", "", "--unlock-authors", ""])
+        return code, outs
+
+    def test_a_command_that_arrived_while_the_plan_was_written_is_reported_and_nothing_is_posted(self):
+        comments = [planned(1, "2026-11-22T09:00:00Z"), dict(planned(2, "2026-11-22T10:01:00Z"), editor=APP),
+                    note("boss", "/sheriff replan b", "2026-11-22T10:05:00Z")]
+        self.assertEqual(self.recheck(task(comments)), (0, [{"action": "plan", "why": ""}]))
+        used = [planned(1, "2026-11-22T08:00:00Z"), planned(2, "2026-11-22T08:30:00Z"), planned(3, "2026-11-22T09:00:00Z")]
+        self.assertEqual(self.recheck(task(used + [note("boss", "/sheriff replan c", "2026-11-22T10:05:00Z")]))[1][-1]["action"], "budget")
+
+    def test_without_a_newer_command_nothing_is_pending_and_the_opened_trigger_never_counts(self):
+        self.assertEqual(self.recheck(task([planned(1), note("boss", "/sheriff replan a", "2026-11-22T09:00:00Z")]))[1][-1]["action"], "skip")
+        self.assertEqual(self.recheck(task(author="boss"))[1][-1], {"action": "skip", "why": "waiting for /sheriff plan from a maintainer"})
+
+    def test_a_missing_issue_is_a_skip_and_without_the_apps_login_nothing_runs(self):
+        self.assertEqual(self.recheck(None), (0, [{"action": "skip", "why": "issue not found"}]))
+        self.assertEqual(self.recheck(task(), login=""), (1, []))
+
+
 class CommentTextTests(unittest.TestCase):
     BODY = "<!-- sheriff-plan v=2 base=" + BASE + " -->\n**Sheriff plan v2**\n## Problem\nx\n<!-- sheriff-usage {\"provider\": \"claude\", \"model\": \"m\", \"usage\": {\"input\": 1}} -->"
 

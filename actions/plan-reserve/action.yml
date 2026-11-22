@@ -1,0 +1,65 @@
+name: Sheriff plan reserve
+description: Decide whether a task issue gets a plan and reserve the version as the gate App (a start comment on the issue) before any model runs; reads no repository code.
+inputs:
+  issue:
+    description: Issue number
+    required: true
+  rounds:
+    description: Plans per issue before a maintainer must allow one more
+    required: false
+    default: "3"
+  ack-authors:
+    description: Logins besides bots, maintainers and admins whose issues and plan commands are trusted, comma-separated
+    required: false
+    default: ""
+  unlock-authors:
+    description: Logins besides maintainers and admins whose /sheriff plan comment allows one more plan after the budget
+    required: false
+    default: ""
+  app-id:
+    description: The Sheriff gate App id
+    required: true
+  app-key:
+    description: The Sheriff gate App private key, base64
+    required: true
+outputs:
+  skip:
+    description: Why no plan is written (empty when one is)
+    value: ${{ steps.reserve.outputs.skip }}
+  version:
+    description: The plan version reserved
+    value: ${{ steps.reserve.outputs.version }}
+  comment_id:
+    description: The reservation comment that the posting job turns into the plan or a failure note
+    value: ${{ steps.reserve.outputs.comment_id }}
+  request:
+    description: The version, and for a replan its reason and requester, as JSON
+    value: ${{ steps.reserve.outputs.request }}
+  app:
+    description: The gate App's slug
+    value: ${{ steps.reserve.outputs.app }}
+runs:
+  using: composite
+  steps:
+    - name: Reserve the plan as the gate App
+      id: reserve
+      shell: bash
+      env:
+        GH_REPO: ${{ github.repository }}
+        AGENT_APP_ID: ${{ inputs.app-id }}
+        AGENT_APP_KEY_B64: ${{ inputs.app-key }}
+        ISSUE: ${{ inputs.issue }}
+        ROUNDS: ${{ inputs.rounds }}
+        SHERIFF_ACK_AUTHORS: ${{ inputs.ack-authors }}
+        UNLOCKERS: ${{ inputs.unlock-authors }}
+        EVENT_ACTION: ${{ github.event.action }}
+        SHERIFF: ${{ github.action_path }}/../..
+      run: |
+        set -euo pipefail
+        if [ -z "$AGENT_APP_ID" ] || [ -z "$AGENT_APP_KEY_B64" ]; then
+          echo "::error title=Sheriff::the sheriff environment needs the secrets SHERIFF_APP_ID and SHERIFF_APP_KEY_B64"
+          exit 1
+        fi
+        python3 -I "$SHERIFF/scripts/app-token.py" --repo "$GH_REPO" --permission issues=write --permission contents=read -- \
+          python3 -I "$SHERIFF/scripts/plan.py" reserve --issue "$ISSUE" --rounds "$ROUNDS" --ack-authors "$SHERIFF_ACK_AUTHORS" \
+          --unlock-authors "$UNLOCKERS" --event "$EVENT_ACTION"

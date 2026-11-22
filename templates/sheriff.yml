@@ -2,12 +2,17 @@ name: Sheriff
 
 # Installed by gh sheriff (https://github.com/nick-the-dev/gh-sheriff). The jobs run here, in this repository's own
 # environments, and every step is one of Sheriff's actions at v1, so fixes arrive without a pull request. Secrets go
-# only to the steps that need them, by name. Comment, relay and schedule triggers always run the default branch's
-# copy of this file, so a pull request cannot change what judges it. A deploy workflow refreshes the gate and the work
-# state when it ends: `gh workflow run sheriff.yml --ref <default branch> -f after_run=<its run id>`.
+# only to the steps that need them, by name. Comment, issue, relay and schedule triggers always run the default
+# branch's copy of this file, so a pull request cannot change what judges it. A deploy workflow refreshes the gate and
+# the work state when it ends: `gh workflow run sheriff.yml --ref <default branch> -f after_run=<its run id>`. With
+# SHERIFF_PLAN=on, a task issue opened by a trusted author, or a `/sheriff plan` or `/sheriff replan <reason>` comment,
+# starts the plan jobs: plan-reserve and plan-post write as the gate App in `sheriff`, and plan runs the model
+# read-only in `sheriff-review`.
 on:
   issue_comment: # zizmor: ignore[dangerous-triggers] runs the default branch's copy; no pull request code runs
     types: [created, edited, deleted]
+  issues:
+    types: [opened]
   workflow_run: # zizmor: ignore[dangerous-triggers] runs the default branch's copy; pull request files are read as data
     # gh sheriff install adds the pull request workflows that hold a required check next to the relay. Their
     # completion re-runs the gate job only; the other jobs run only from the relay (they check the workflow's name).
@@ -29,6 +34,10 @@ on:
         description: Run the Sheriff reviewer for this pull request
         type: boolean
         default: false
+      plan_issue:
+        description: Task issue to plan (plan-post dispatches this when a plan command arrived while a plan was written)
+        required: false
+        default: ""
 
 permissions:
   actions: read
@@ -39,7 +48,9 @@ permissions:
 jobs:
   gate:
     name: Sheriff gate
-    if: github.event_name != 'issue_comment' || github.event.issue.pull_request
+    if: >-
+      github.event_name != 'issues' && !inputs.plan_issue &&
+      (github.event_name != 'issue_comment' || github.event.issue.pull_request)
     runs-on: ${{ vars.SHERIFF_RUNS_ON || 'ubuntu-latest' }}
     timeout-minutes: 10
     permissions:
@@ -60,6 +71,8 @@ jobs:
           SHERIFF_HEALTH_URL: ${{ vars.SHERIFF_HEALTH_URL }}
           SHERIFF_DEPLOY_WORKFLOW: ${{ vars.SHERIFF_DEPLOY_WORKFLOW }}
           SHERIFF_OVERRIDE: ${{ vars.SHERIFF_OVERRIDE }}
+          SHERIFF_PLAN: ${{ vars.SHERIFF_PLAN }}
+          SHERIFF_PLAN_SINCE: ${{ vars.SHERIFF_PLAN_SINCE }}
         with:
           pr: ${{ github.event.issue.number || join(github.event.workflow_run.pull_requests.*.number, ' ') || inputs.pr }}
           after-run: ${{ inputs.after_run }}
@@ -90,6 +103,9 @@ jobs:
       review_id: ${{ steps.reserve.outputs.review_id }}
       counts: ${{ steps.reserve.outputs.counts }}
       attempt: ${{ steps.reserve.outputs.attempt }}
+      plan_issue: ${{ steps.reserve.outputs.plan_issue }}
+      plan_version: ${{ steps.reserve.outputs.plan_version }}
+      app: ${{ steps.reserve.outputs.app }}
     steps:
       - name: Count the round as the gate App before any model runs
         id: reserve
@@ -101,6 +117,7 @@ jobs:
           first-rounds: ${{ vars.SHERIFF_FIRST_PASS_ROUNDS || '3' }}
           final-rounds: ${{ vars.SHERIFF_REVIEW_ROUNDS || '3' }}
           unlock-authors: ${{ vars.SHERIFF_UNLOCK_AUTHORS }}
+          plan: ${{ vars.SHERIFF_PLAN }}
           app-id: ${{ secrets.SHERIFF_APP_ID }}
           app-key: ${{ secrets.SHERIFF_APP_KEY_B64 }}
 
@@ -114,6 +131,7 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
+      issues: read
       pull-requests: read
     environment:
       name: sheriff-review
@@ -138,6 +156,9 @@ jobs:
           final-rounds: ${{ vars.SHERIFF_REVIEW_ROUNDS || '3' }}
           claude-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           opencode-key: ${{ secrets.OPENCODE_API_KEY }}
+          plan-issue: ${{ needs.reserve.outputs.plan_issue }}
+          plan-version: ${{ needs.reserve.outputs.plan_version }}
+          app: ${{ needs.reserve.outputs.app }}
 
   post:
     name: Post the Sheriff verdict
@@ -162,6 +183,8 @@ jobs:
           SHERIFF_HEALTH_URL: ${{ vars.SHERIFF_HEALTH_URL }}
           SHERIFF_DEPLOY_WORKFLOW: ${{ vars.SHERIFF_DEPLOY_WORKFLOW }}
           SHERIFF_OVERRIDE: ${{ vars.SHERIFF_OVERRIDE }}
+          SHERIFF_PLAN: ${{ vars.SHERIFF_PLAN }}
+          SHERIFF_PLAN_SINCE: ${{ vars.SHERIFF_PLAN_SINCE }}
         with:
           app-id: ${{ secrets.SHERIFF_APP_ID }}
           app-key: ${{ secrets.SHERIFF_APP_KEY_B64 }}
@@ -170,7 +193,7 @@ jobs:
   state:
     name: Sync work stages
     if: >-
-      github.event_name != 'issue_comment' &&
+      github.event_name != 'issue_comment' && github.event_name != 'issues' && !inputs.plan_issue &&
       (github.event_name != 'workflow_run' || github.event.workflow_run.name == 'Sheriff Relay') &&
       vars.SHERIFF_WORK_STATE == 'on'
     runs-on: ${{ vars.SHERIFF_RUNS_ON || 'ubuntu-latest' }}
@@ -191,3 +214,105 @@ jobs:
           SHERIFF_DEPLOY_WORKFLOW: ${{ vars.SHERIFF_DEPLOY_WORKFLOW }}
         with:
           after-run: ${{ inputs.after_run }}
+
+  plan-reserve:
+    name: Reserve the Sheriff plan
+    if: >-
+      vars.SHERIFF_PLAN == 'on' && !github.event.issue.pull_request &&
+      ((github.event_name == 'issues' && github.event.action == 'opened') ||
+      (github.event_name == 'issue_comment' && github.event.action == 'created' &&
+      (startsWith(github.event.comment.body, '/sheriff plan') || startsWith(github.event.comment.body, '/sheriff replan'))) ||
+      (github.event_name == 'workflow_dispatch' && inputs.plan_issue != ''))
+    concurrency:
+      group: sheriff-plan-${{ github.event.issue.number || inputs.plan_issue }}
+      cancel-in-progress: false
+    runs-on: ${{ vars.SHERIFF_RUNS_ON || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    environment:
+      name: sheriff
+      deployment: false
+    outputs:
+      skip: ${{ steps.reserve.outputs.skip }}
+      version: ${{ steps.reserve.outputs.version }}
+      comment_id: ${{ steps.reserve.outputs.comment_id }}
+      request: ${{ steps.reserve.outputs.request }}
+      app: ${{ steps.reserve.outputs.app }}
+    steps:
+      - name: Reserve the plan as the gate App before any model runs
+        id: reserve
+        uses: nick-the-dev/gh-sheriff/actions/plan-reserve@v1 # zizmor: ignore[unpinned-uses] follows Sheriff v1 so fixes arrive without a pull request
+        with:
+          issue: ${{ github.event.issue.number || inputs.plan_issue }}
+          rounds: ${{ vars.SHERIFF_PLAN_ROUNDS || '3' }}
+          ack-authors: ${{ vars.SHERIFF_ACK_AUTHORS }}
+          unlock-authors: ${{ vars.SHERIFF_UNLOCK_AUTHORS }}
+          app-id: ${{ secrets.SHERIFF_APP_ID }}
+          app-key: ${{ secrets.SHERIFF_APP_KEY_B64 }}
+
+  plan:
+    name: Sheriff plan
+    needs: plan-reserve
+    if: needs.plan-reserve.outputs.skip == ''
+    concurrency:
+      group: sheriff-plan-${{ github.event.issue.number || inputs.plan_issue }}
+      cancel-in-progress: false
+    runs-on: ${{ vars.SHERIFF_RUNS_ON || 'ubuntu-latest' }}
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      issues: read
+    environment:
+      name: sheriff-review
+      deployment: false
+    steps:
+      - name: Write the plan read-only from the default branch
+        uses: nick-the-dev/gh-sheriff/actions/plan@v1 # zizmor: ignore[unpinned-uses] follows Sheriff v1 so fixes arrive without a pull request
+        with:
+          issue: ${{ github.event.issue.number || inputs.plan_issue }}
+          request: ${{ needs.plan-reserve.outputs.request }}
+          app: ${{ needs.plan-reserve.outputs.app }}
+          ack-authors: ${{ vars.SHERIFF_ACK_AUTHORS }}
+          model: ${{ vars.SHERIFF_PLAN_MODEL || 'claude:claude-opus-5-5' }}
+          turns: ${{ vars.SHERIFF_PLAN_TURNS || '40' }}
+          web: ${{ vars.SHERIFF_PLAN_WEB || 'search' }}
+          fetch-domains: ${{ vars.SHERIFF_PLAN_FETCH_DOMAINS }}
+          claude-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          opencode-key: ${{ secrets.OPENCODE_API_KEY }}
+
+  plan-post:
+    name: Post the Sheriff plan
+    needs: [plan-reserve, plan]
+    if: always() && needs.plan-reserve.result == 'success' && needs.plan-reserve.outputs.skip == ''
+    concurrency:
+      group: sheriff-plan-${{ github.event.issue.number || inputs.plan_issue }}
+      cancel-in-progress: false
+    runs-on: ${{ vars.SHERIFF_RUNS_ON || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    permissions:
+      actions: write
+      contents: read
+    environment:
+      name: sheriff
+      deployment: false
+    steps:
+      - name: Post the plan as the gate App and re-review the linked pull requests
+        uses: nick-the-dev/gh-sheriff/actions/plan-post@v1 # zizmor: ignore[unpinned-uses] follows Sheriff v1 so fixes arrive without a pull request
+        env:
+          SHERIFF_ACK_AUTHORS: ${{ vars.SHERIFF_ACK_AUTHORS }}
+          SHERIFF_VERSION_URL: ${{ vars.SHERIFF_VERSION_URL }}
+          SHERIFF_HEALTH_URL: ${{ vars.SHERIFF_HEALTH_URL }}
+          SHERIFF_DEPLOY_WORKFLOW: ${{ vars.SHERIFF_DEPLOY_WORKFLOW }}
+          SHERIFF_OVERRIDE: ${{ vars.SHERIFF_OVERRIDE }}
+          SHERIFF_PLAN: ${{ vars.SHERIFF_PLAN }}
+          SHERIFF_PLAN_SINCE: ${{ vars.SHERIFF_PLAN_SINCE }}
+        with:
+          issue: ${{ github.event.issue.number || inputs.plan_issue }}
+          version: ${{ needs.plan-reserve.outputs.version }}
+          comment-id: ${{ needs.plan-reserve.outputs.comment_id }}
+          rounds: ${{ vars.SHERIFF_PLAN_ROUNDS || '3' }}
+          ack-authors: ${{ vars.SHERIFF_ACK_AUTHORS }}
+          unlock-authors: ${{ vars.SHERIFF_UNLOCK_AUTHORS }}
+          app-id: ${{ secrets.SHERIFF_APP_ID }}
+          app-key: ${{ secrets.SHERIFF_APP_KEY_B64 }}
