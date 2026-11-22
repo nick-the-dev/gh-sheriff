@@ -1,21 +1,29 @@
 #!/usr/bin/env python3
 """Sheriff gate: post the Merge gate commit status on the heads of open pull requests into the default branch.
 
-The Review check run is created by the Sheriff review workflow, as the gate App, so only that App can change it."""
+The Review check run is created by the Sheriff review workflow, as the gate App, so only that App can change it. With
+SHERIFF_PLAN=on the gate also waits for the App's current plan on the pull request's task issue and a Review keyed to it."""
 import argparse
 import datetime
 import http.client
+import importlib.util
 import json
 import os
+import pathlib
 import re
 import subprocess
 import sys
 import urllib.error
 import urllib.request
 
+_PLAN_SPEC = importlib.util.spec_from_file_location("sheriff_plan", pathlib.Path(__file__).with_name("plan.py"))
+planner = importlib.util.module_from_spec(_PLAN_SPEC)
+_PLAN_SPEC.loader.exec_module(planner)
+
 MERGE_CONTEXT = "Merge gate"
 ACK_RE = re.compile(r"<!--\s*sheriff-ack\s*-->")
-TRANSIENT = ("has not concluded", "production does not serve the default branch", "no deploy run for the default branch")
+TRANSIENT = ("has not concluded", "production does not serve the default branch", "no deploy run for the default branch",
+             "needs a Sheriff", "could not read the plan")
 DESCRIPTION_LIMIT = 140
 
 
@@ -161,18 +169,21 @@ def production_failures(version_url, health_url, workflow):
     return failures
 
 
-def merge_status(number, comments, prod_failures, listed, override, decision="", prod_checked=True):
+def merge_status(number, comments, prod_failures, listed, override, decision="", prod_checked=True, plan_failure="", plan_note=""):
     overridden = override == str(number)
     failures = [] if overridden else list(prod_failures)
+    if plan_failure:
+        failures.append(plan_failure)
     if decision == "CHANGES_REQUESTED":
         failures.append("a reviewer requested changes")
     failures.extend("unacknowledged comment from " + item for item in unanswered(comments, listed))
     if not failures:
+        suffix = "; " + plan_note if plan_note else ""
         if overridden:
-            return "success", "override: production checks skipped for this PR by SHERIFF_OVERRIDE"
+            return "success", "override: production checks skipped for this PR by SHERIFF_OVERRIDE" + suffix
         if not prod_checked:
-            return "success", "comments answered; no production checks configured"
-        return "success", "production serves the default branch and is healthy, deploy green, comments answered"
+            return "success", "comments answered; no production checks configured" + suffix
+        return "success", "production serves the default branch and is healthy, deploy green, comments answered" + suffix
     transient = all(any(mark in item for mark in TRANSIENT) for item in failures)
     return ("pending" if transient else "failure"), failures[0]
 
@@ -224,8 +235,53 @@ def pull_comments(number, reviews):
     return [row for row in rows if isinstance(row, dict) and text(row).strip()]
 
 
+def labeled_by_admin(number):
+    events = gh_pages("repos/{owner}/{repo}/issues/" + str(number) + "/events")
+    labeled = [event for event in events if isinstance(event, dict) and event.get("event") == "labeled"
+               and str((event.get("label") or {}).get("name") or "").lower() == planner.NO_PLAN_LABEL]
+    login = str(((labeled[-1].get("actor") if labeled else None) or {}).get("login") or "")
+    if not login:
+        return False
+    permission = gh_json(["api", "repos/{owner}/{repo}/collaborators/" + login + "/permission"])
+    return isinstance(permission, dict) and permission.get("role_name") == "admin"
+
+
+def plan_reviewed(head, slug, version):
+    data = gh_json(["api", "repos/{owner}/{repo}/commits/" + head + "/check-runs?check_name=Review&per_page=100"])
+    runs = data.get("check_runs") if isinstance(data, dict) else None
+    return any(isinstance(check, dict) and planner.bare((check.get("app") or {}).get("slug")) == slug
+               and check.get("status") == "completed" and planner.keyed_to(check.get("external_id"), version)
+               for check in runs or [])
+
+
+def plan_gate(number, view, slug):
+    if setting("SHERIFF_PLAN") != "on":
+        return "", ""
+    since, opened = parse_time(setting("SHERIFF_PLAN_SINCE")), parse_time(view.get("createdAt"))
+    if since is not None and opened is not None and opened < since:
+        return "", ""
+    labels = [str(label.get("name") or "").lower() for label in view.get("labels") or [] if isinstance(label, dict)]
+    if planner.NO_PLAN_LABEL in labels and labeled_by_admin(number):
+        return "", "no plan needed (" + planner.NO_PLAN_LABEL + ")"
+    repo = setting("GH_REPO")
+    try:
+        issue = planner.task_issue(view, repo, gh_json)
+    except planner.PlanError:
+        known = planner.closing(view.get("closingIssuesReferences"), repo)
+        return "could not read the plan on #" + str(known[0] if known else number), ""
+    if not issue:
+        return "", ""
+    where = "#" + str(issue["number"])
+    current = planner.current_plan(issue["comments"], slug)
+    if not current:
+        return "needs a Sheriff plan on " + where, ""
+    if not plan_reviewed(str(view.get("headRefOid") or ""), slug, current["version"]):
+        return "needs a Sheriff review against plan v" + str(current["version"]) + " on " + where, ""
+    return "", ""
+
+
 def judge(number, prod_failures, listed, override, dry_run, prod_checked=True, default_branch="", quiet=False):
-    view = gh_json(["pr", "view", str(number), "--json", "state,headRefOid,baseRefName"])
+    view = gh_json(["pr", "view", str(number), "--json", "state,headRefOid,baseRefName,title,createdAt,labels,closingIssuesReferences"])
     head = str(view.get("headRefOid") or "")
     if str(view.get("state") or "").upper() != "OPEN" or len(head) != 40:
         return {"pr": number, "skipped": "not open"}
@@ -234,12 +290,13 @@ def judge(number, prod_failures, listed, override, dry_run, prod_checked=True, d
     try:
         reviews = gh_pages("repos/{owner}/{repo}/pulls/" + str(number) + "/reviews")
         comments = pull_comments(number, reviews)
+        plan_failure, plan_note = plan_gate(number, view, planner.bare(setting("GH_ACTOR_LOGIN")))
     except GateError as exc:
         if not quiet:
             post(head, MERGE_CONTEXT, "error", "cannot read this pull request: " + str(exc), dry_run)
         raise
     decision = "CHANGES_REQUESTED" if changes_requested(reviews) else ""
-    state, description = merge_status(number, comments, prod_failures, listed, override, decision, prod_checked)
+    state, description = merge_status(number, comments, prod_failures, listed, override, decision, prod_checked, plan_failure, plan_note)
     return {"pr": number, "head": head, "state": state, "description": description, "quiet": quiet,
             "current": None if quiet else current_statuses(head)}
 

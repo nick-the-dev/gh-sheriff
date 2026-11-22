@@ -13,6 +13,7 @@ SPEC.loader.exec_module(status)
 
 HEAD = "a" * 40
 OLD = "b" * 40
+BASE = "c" * 40
 NOBODY = ()
 ACK = "Answered.\n<!-- sheriff-ack -->"
 
@@ -163,6 +164,87 @@ class EvaluateTests(unittest.TestCase):
     def test_closed_pull_request_is_skipped(self):
         result, posted = self.evaluate({"state": "MERGED", "headRefOid": HEAD, "baseRefName": "main"})
         self.assertEqual(result, {"pr": 7, "skipped": "not open"})
+
+
+class PlanGateTests(unittest.TestCase):
+    ROLES = {"chief": "admin", "boss": "maintain"}
+
+    def judge(self, plan_on=True, plan=1, plan_author="gate", reviewed_keys=(), created="2026-11-22T10:00:00Z",
+              title="fix(x): y (LOGIN-FIX)", refs=None, labels=(), labeled_by="", comments=()):
+        reads = []
+        refs = [{"number": 12, "repository": {"owner": {"login": "o"}, "name": "r"}}] if refs is None else refs
+        view = {"state": "OPEN", "headRefOid": HEAD, "baseRefName": "main", "title": title, "createdAt": created,
+                "labels": [{"name": name} for name in labels], "closingIssuesReferences": refs}
+        notes = []
+        if plan:
+            body = "<!-- sheriff-plan v=" + str(plan) + " base=" + BASE + " -->\nplan"
+            notes.append({"databaseId": 1, "body": body, "createdAt": "2026-11-22T09:00:00Z",
+                          "author": {"login": plan_author, "__typename": "Bot" if plan_author == "gate" else "User"}})
+        issue = {"data": {"repository": {"issue": {"number": 12, "title": "LOGIN-FIX: fix login", "body": "", "state": "OPEN",
+                 "author": {"login": "owner", "__typename": "User"}, "labels": {"nodes": []},
+                 "comments": {"pageInfo": {"hasNextPage": False}, "nodes": notes}}}}}
+        runs = {"check_runs": [{"app": {"slug": "gate"}, "status": "completed", "external_id": key} for key in reviewed_keys]}
+        events = [{"event": "labeled", "label": {"name": name}, "actor": {"login": labeled_by}} for name in labels]
+
+        def fake_gh_json(args):
+            if args[0] == "pr":
+                return view
+            if args[1] == "graphql":
+                reads.append(args)
+                return issue
+            joined = " ".join(args)
+            if "/permission" in joined:
+                return {"role_name": self.ROLES.get(args[1].split("/")[-2], "read")}
+            if "check-runs" in joined:
+                return runs
+            return []
+
+        def fake_pages(path):
+            return events if path.endswith("/events") else list(comments)
+
+        env = {"GH_REPO": "o/r", "GH_ACTOR_LOGIN": "gate[bot]", "SHERIFF_PLAN": "on" if plan_on else "",
+               "SHERIFF_PLAN_SINCE": "2026-11-22T00:00:00Z"}
+        with mock.patch.object(status, "gh_json", side_effect=fake_gh_json), \
+             mock.patch.object(status, "gh_pages", side_effect=fake_pages), \
+             mock.patch.dict(os.environ, env):
+            judged = status.judge(7, [], NOBODY, "", False, True, "main")
+        return judged["state"], judged["description"], reads
+
+    def test_without_planning_on_no_issue_is_read(self):
+        state, description, reads = self.judge(plan_on=False, plan=None)
+        self.assertEqual(state, "success")
+        self.assertEqual(reads, [])
+
+    def test_a_task_pull_request_without_a_plan_is_pending_with_the_issue_number(self):
+        self.assertEqual(self.judge(plan=None)[:2], ("pending", "needs a Sheriff plan on #12"))
+
+    def test_a_plan_pasted_by_a_person_does_not_count(self):
+        self.assertEqual(self.judge(plan=1, plan_author="writer")[:2], ("pending", "needs a Sheriff plan on #12"))
+
+    def test_a_current_plan_without_a_review_against_it_is_pending(self):
+        self.assertEqual(self.judge(plan=2, reviewed_keys=[BASE, BASE + "/plan-1"])[:2], ("pending", "needs a Sheriff review against plan v2 on #12"))
+
+    def test_a_reviewed_current_plan_passes(self):
+        self.assertEqual(self.judge(plan=2, reviewed_keys=[BASE + "/plan-2"])[0], "success")
+
+    def test_a_pull_request_opened_before_planning_started_is_exempt(self):
+        self.assertEqual(self.judge(plan=None, created="2026-11-21T23:00:00Z")[0], "success")
+
+    def test_a_pull_request_without_task_id_or_closing_reference_is_not_gated(self):
+        self.assertEqual(self.judge(plan=None, title="Install Sheriff", refs=[])[0], "success")
+
+    def test_the_no_plan_label_exempts_only_when_an_admin_applied_it(self):
+        state, description, _ = self.judge(plan=None, labels=["sheriff:no-plan"], labeled_by="chief")
+        self.assertEqual(state, "success")
+        self.assertTrue(description.endswith("; no plan needed (sheriff:no-plan)"))
+        self.assertEqual(self.judge(plan=None, labels=["sheriff:no-plan"], labeled_by="boss")[0], "pending")
+
+    def test_an_unreadable_plan_is_pending_not_an_error(self):
+        with mock.patch.object(status.planner, "read_issue", side_effect=status.planner.PlanError("bad")):
+            self.assertEqual(self.judge(plan=1)[:2], ("pending", "could not read the plan on #12"))
+
+    def test_a_missing_plan_with_an_unanswered_comment_is_a_failure(self):
+        self.assertEqual(self.judge(plan=None, comments=[comment("owner", "Why?", "2026-11-22T10:00:00Z")])[0], "failure")
 
 
 class SweepTests(unittest.TestCase):
