@@ -451,7 +451,7 @@ DEPLOYED = {"databaseId": 1, "status": "completed", "conclusion": "success", "cr
 
 class BundleMergeTests(unittest.TestCase):
     def run_main(self, numbers, undeployed=2, limit="5", args=(), version=None, health=200, deploys=(DEPLOYED,), succeeded=(),
-                 compare_error=False, blocked=(), **settings):
+                 completed=(DEPLOYED,), compare_error=False, blocked=(), **settings):
         posted, self.reads = {}, []
         version = (200, json.dumps({"sha": OLD if undeployed else HEAD}).encode()) if version is None else version
         env = {"SHERIFF_DEFAULT_BRANCH": "main", "SHERIFF_MERGE_MODE": "bundle", "SHERIFF_BUNDLE_MAX": limit,
@@ -464,7 +464,9 @@ class BundleMergeTests(unittest.TestCase):
                 return {"state": "OPEN", "headRefOid": args[2] * 40, "baseRefName": "main"}
             if args[:2] == ["run", "list"]:
                 self.reads.append(args)
-                return list(deploys) if "--commit" in args else [{"headSha": sha} for sha in succeeded]
+                if "--commit" in args:
+                    return list(deploys)
+                return list(completed) if "completed" in args else [{"headSha": sha} for sha in succeeded]
             if "rules/branches" in args[1]:
                 raise status.GateError("unreadable")
             return []
@@ -478,7 +480,7 @@ class BundleMergeTests(unittest.TestCase):
             if "/compare/" in args[1]:
                 self.reads.append(args)
                 if compare_error:
-                    raise status.GateError("gh api repos/{owner}/{repo}/compare failed: 404")
+                    raise status.GateError("gh " + " ".join(args[:3]) + " failed: gh: Not Found (HTTP 404)")
                 return str(undeployed) + "\n"
             if args[:2] == ["api", "-X"]:
                 fields = dict(item.split("=", 1) for item in args if "=" in item and not item.startswith("repos/"))
@@ -519,7 +521,7 @@ class BundleMergeTests(unittest.TestCase):
         for deploys in ((running,), ()):
             with self.subTest(deploys=deploys):
                 posted = self.run_main([1, 2], undeployed=1, deploys=deploys)
-                self.assertEqual(posted[1], ("success", "production is healthy and no deploy failed, comments answered"))
+                self.assertEqual(posted[1], ("success", "production is healthy and the last deploy succeeded, comments answered"))
                 self.assertEqual(posted[2][0], "success")
 
     def test_a_failed_deploy_or_an_unhealthy_production_blocks_every_pull_request(self):
@@ -531,10 +533,52 @@ class BundleMergeTests(unittest.TestCase):
                 posted = self.run_main([1, 2], undeployed=0, **case)
                 self.assertEqual(posted, {1: ("failure", expected), 2: ("failure", expected)})
 
+    def test_a_failed_last_deploy_holds_every_pull_request_while_the_head_has_no_counted_run(self):
+        failed = {"databaseId": 4, "status": "completed", "conclusion": "failure", "createdAt": "2026-11-22T11:00:00Z"}
+        stub = {"databaseId": 5, "status": "completed", "conclusion": "skipped", "createdAt": "2026-11-22T11:05:00Z"}
+        running = {"databaseId": 6, "status": "in_progress", "conclusion": None, "createdAt": "2026-11-22T11:06:00Z"}
+        held = "the last deploy run 4 on the default branch concluded failure; waiting for a successful deploy"
+        for deploys in ((), (stub,), (running,)):
+            with self.subTest(deploys=deploys):
+                posted = self.run_main([1, 2], undeployed=1, deploys=deploys, completed=(DEPLOYED, failed))
+                self.assertEqual(posted, {1: ("pending", held), 2: ("pending", held)})
+        listing = next(args for args in self.reads if "completed" in args)
+        self.assertEqual(listing[:8], ["run", "list", "--workflow", "deploy.yml", "--branch", "main", "--status", "completed"])
+        self.assertEqual(self.run_main([1], undeployed=0, deploys=(failed,), completed=(DEPLOYED, failed))[1],
+                         ("failure", "deploy run 4 for the default branch concluded failure"))
+
+    def test_only_the_newest_completed_deploy_counts_and_skipped_or_cancelled_runs_are_passed_over(self):
+        older = {"databaseId": 3, "status": "completed", "conclusion": "failure", "createdAt": "2026-11-22T09:00:00Z"}
+        newer = dict(older, databaseId=4, createdAt="2026-11-22T11:00:00Z")
+        replaced = [{"databaseId": 7, "status": "completed", "conclusion": "cancelled", "createdAt": "2026-11-22T12:00:00Z"},
+                    {"databaseId": 8, "status": "completed", "conclusion": "skipped", "createdAt": "2026-11-22T12:30:00Z"}]
+        self.assertEqual(self.run_main([1], undeployed=1, completed=[older, DEPLOYED] + replaced)[1][0], "success")
+        self.assertEqual(self.run_main([1], undeployed=1, completed=[DEPLOYED, newer] + replaced)[1][0], "pending")
+        self.assertEqual(self.run_main([1], undeployed=1, completed=replaced)[1][0], "success")
+
+    def test_the_override_merges_past_a_full_bundle_and_a_failed_deploy(self):
+        failed = {"databaseId": 4, "status": "completed", "conclusion": "failure", "createdAt": "2026-11-22T11:00:00Z"}
+        posted = self.run_main([1, 2], undeployed=5, deploys=(failed,), completed=(failed,), SHERIFF_OVERRIDE="1")
+        self.assertEqual(posted[1], ("success", "override: production checks skipped for this PR by SHERIFF_OVERRIDE"))
+        self.assertEqual(posted[2][0], "failure")
+        posted = self.run_main([1, 2], undeployed=5, SHERIFF_OVERRIDE="1")
+        self.assertEqual(posted[1][0], "success")
+        self.assertEqual(posted[2], ("pending", "bundle full: 5 merged pull requests wait for the deploy"))
+        posted = self.run_main([1, 2, 3, 4, 5], undeployed=2, SHERIFF_OVERRIDE="3")
+        self.assertEqual([posted[n][0] for n in (1, 2, 3, 4)], ["success"] * 4)
+        self.assertEqual(posted[5], ("pending", "waiting for a bundle slot behind #4"))
+
+    def test_serial_mode_still_ranks_the_overridden_pull_request(self):
+        posted = self.run_main([1, 2, 3], undeployed=0, SHERIFF_MERGE_MODE="", SHERIFF_OVERRIDE="3")
+        self.assertEqual(posted[1][0], "success")
+        self.assertEqual(posted[3], ("pending", "one merge per deploy: waiting for #1"))
+
     def test_an_unreadable_undeployed_count_blocks_every_pull_request(self):
         posted = self.run_main([1, 2], compare_error=True)
         self.assertEqual({state for state, _ in posted.values()}, {"failure"})
         self.assertTrue(posted[1][1].startswith("cannot read the undeployed pull requests: "))
+        self.assertIn("compare/" + OLD[:12] + "..." + HEAD[:12] + " ", posted[1][1])
+        self.assertIn("Not Found", posted[1][1])
 
     def test_a_version_without_a_commit_blocks_every_pull_request(self):
         posted = self.run_main([1], version=(200, b'{"version": "1.2"}'))
@@ -545,7 +589,7 @@ class BundleMergeTests(unittest.TestCase):
         posted = self.run_main([1, 2, 3], undeployed=4, succeeded=(OLD,), SHERIFF_VERSION_URL="")
         self.assertEqual(posted[1][0], "success")
         self.assertEqual(posted[2], ("pending", "waiting for a bundle slot behind #1"))
-        listing = next(args for args in self.reads if "--status" in args)
+        listing = next(args for args in self.reads if "success" in args)
         self.assertEqual(listing, ["run", "list", "--workflow", "deploy.yml", "--branch", "main", "--status", "success", "--limit", "1", "--json", "headSha"])
         self.assertIn("compare/" + OLD + "..." + HEAD, " ".join(self.reads[-1]))
 
@@ -577,7 +621,7 @@ class BundleMergeTests(unittest.TestCase):
     def test_single_mode_counts_the_lower_passing_pull_requests_without_posting_on_them(self):
         posted = self.run_main([1, 2, 3, 4], undeployed=2, args=["--pr", "4"])
         self.assertEqual(posted, {4: ("pending", "waiting for a bundle slot behind #3")})
-        self.assertEqual(self.run_main([1, 2, 3, 4], undeployed=1, args=["--pr", "4"]), {4: ("success", "production is healthy and no deploy failed, comments answered")})
+        self.assertEqual(self.run_main([1, 2, 3, 4], undeployed=1, args=["--pr", "4"]), {4: ("success", "production is healthy and the last deploy succeeded, comments answered")})
 
 
 if __name__ == "__main__":

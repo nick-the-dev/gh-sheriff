@@ -25,7 +25,7 @@ MERGE_CONTEXT = "Merge gate"
 ACK_RE = re.compile(r"<!--\s*sheriff-ack\s*-->")
 COMMAND_RE = re.compile(r"\s*/sheriff (?:review|plan|replan\s+\S.*)\s*", re.S)
 DEPLOYING = ("has not concluded", "production does not serve the default branch", "no deploy run for the default branch")
-TRANSIENT = DEPLOYING + ("needs a Sheriff", "could not read the plan")
+TRANSIENT = DEPLOYING + ("needs a Sheriff", "could not read the plan", "waiting for a successful deploy")
 DESCRIPTION_LIMIT = 140
 BUNDLE_MAX = 5
 SHA_RE = re.compile(r"[0-9a-f]{40}")
@@ -149,13 +149,17 @@ def http_get(url):
         return None, b""
 
 
+def newest(runs):
+    return max(runs, key=lambda item: (str(item.get("createdAt") or ""), str(item.get("databaseId") or "")))
+
+
 def deploy_failures(workflow, main_sha):
     runs = gh_json(["run", "list", "--workflow", workflow, "--commit", main_sha, "--limit", "30",
                     "--json", "databaseId,status,conclusion,createdAt"])
     runs = [run for run in runs if isinstance(run, dict) and run.get("conclusion") != "skipped"]
     if not runs:
         return ["no deploy run for the default branch " + main_sha[:12] + " yet"]
-    run = max(runs, key=lambda item: (str(item.get("createdAt") or ""), str(item.get("databaseId") or "")))
+    run = newest(runs)
     if run.get("status") != "completed":
         return ["deploy run " + str(run.get("databaseId")) + " for the default branch has not concluded"]
     if run.get("conclusion") != "success":
@@ -189,11 +193,24 @@ def production_state(version_url, health_url, workflow):
     return failures, main_sha, served
 
 
+def last_deploy_failures(workflow, branch):
+    runs = gh_json(["run", "list", "--workflow", workflow, "--branch", branch, "--status", "completed", "--limit", "30",
+                    "--json", "databaseId,conclusion,createdAt"])
+    runs = [run for run in runs if isinstance(run, dict) and run.get("conclusion") not in ("skipped", "cancelled")]
+    run = newest(runs) if runs else None
+    if run is None or run.get("conclusion") == "success":
+        return []
+    return ["the last deploy run " + str(run.get("databaseId")) + " on the default branch concluded " + str(run.get("conclusion")) +
+            "; waiting for a successful deploy"]
+
+
 def bundle_production(version_url, health_url, workflow, branch):
     if not (version_url or health_url or workflow):
         return [], None
     failures, main_sha, served = production_state(version_url, health_url, workflow)
     failures = [item for item in failures if not any(mark in item for mark in DEPLOYING)]
+    if workflow:
+        failures.extend(last_deploy_failures(workflow, branch))
     if not (version_url or workflow):
         return failures, None
     try:
@@ -206,7 +223,8 @@ def bundle_production(version_url, health_url, workflow, branch):
             raise GateError("production names no commit")
         undeployed = 0 if served == main_sha else int(gh(["api", "repos/{owner}/{repo}/compare/" + served + "..." + main_sha, "--jq", ".ahead_by"]))
     except (GateError, ValueError) as exc:
-        return failures + ["cannot read the undeployed pull requests: " + str(exc)], None
+        reason = str(exc).replace(main_sha, main_sha[:12]).replace(str(served), str(served)[:12])
+        return failures + ["cannot read the undeployed pull requests: " + reason], None
     return failures, undeployed
 
 
@@ -226,7 +244,7 @@ def merge_status(number, comments, prod_failures, listed, override, decision="",
         if not prod_checked:
             return "success", "comments answered; no production checks configured" + suffix
         if bundled:
-            return "success", "production is healthy and no deploy failed, comments answered" + suffix
+            return "success", "production is healthy and the last deploy succeeded, comments answered" + suffix
         return "success", "production serves the default branch and is healthy, deploy green, comments answered" + suffix
     transient = all(any(mark in item for mark in TRANSIENT) for item in failures)
     return ("pending" if transient else "failure"), failures[0]
@@ -389,12 +407,13 @@ def checks_green(row, required=None):
     return all(result in ("SUCCESS", "NEUTRAL", "SKIPPED") for _, result in latest.values())
 
 
-def serialize(judged, armed, green, bundle=None):
+def serialize(judged, armed, green, bundle=None, override=""):
     for number in armed:
         if judged.get(number, {}).get("state") == "success" and number not in green:
             judged[number]["state"] = "pending"
             judged[number]["description"] = "waiting for its checks before merging"
-    passing = sorted(number for number, item in judged.items() if number in armed and item.get("state") == "success")
+    passing = sorted(number for number, item in judged.items() if number in armed and item.get("state") == "success"
+                     and (bundle is None or str(number) != override))
     undeployed, limit = bundle or (0, 1)
     if undeployed is None:
         return
@@ -457,7 +476,7 @@ def main(argv=None):
         if number in armed and judged[number].get("state") == "success":
             for lower in sorted(other for other in armed if other < number and other not in judged):
                 run(lower, quiet=True)
-    serialize(judged, armed, green, (undeployed, bundle_cap(setting("SHERIFF_BUNDLE_MAX")) or BUNDLE_MAX) if bundled else None)
+    serialize(judged, armed, green, (undeployed, bundle_cap(setting("SHERIFF_BUNDLE_MAX")) or BUNDLE_MAX) if bundled else None, override)
     results = [publish(item, args.dry_run) for item in judged.values() if not item.get("quiet")]
     failed = any("error" in item for item in results)
     print(json.dumps({"ok": not failed, "results": results}, ensure_ascii=False), flush=True)

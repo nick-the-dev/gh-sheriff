@@ -185,15 +185,23 @@ with "one merge per deploy: waiting for #N".
 
 **Bundle.** Up to `SHERIFF_BUNDLE_MAX` (default 5) merged pull requests wait for one deploy. Sheriff counts the commits
 merged since the commit production serves: the `sha` from `SHERIFF_VERSION_URL`, or without it the newest successful
-run of `SHERIFF_DEPLOY_WORKFLOW` on the default branch. The free slots go to the lowest-numbered auto-merge pull
+run of `SHERIFF_DEPLOY_WORKFLOW` on the default branch. Prefer `SHERIFF_VERSION_URL`: if your deploy workflow lets a
+replaced run conclude success, the newest successful run can name a newer commit than production serves, so Sheriff
+counts too few merges and a bundle can grow past the cap. The free slots go to the lowest-numbered auto-merge pull
 requests that would pass. The others stay pending with "waiting for a bundle slot behind #N", or "bundle full: K
 merged pull requests wait for the deploy" when no slot is left.
 
 A deploy on its way doesn't hold a bundle back: production may serve an older commit and a deploy run may still be
-going. A failed deploy run, a version or health endpoint that is not 200, or a count Sheriff cannot read blocks every
-pull request. Without `SHERIFF_VERSION_URL` and `SHERIFF_DEPLOY_WORKFLOW` there is nothing to count from, so nothing
-caps a bundle; `gh sheriff doctor` warns about that. With squash merges one pull request is one commit; with merge
-commits or rebase merges a bundle fills sooner.
+going. A failed deploy does: if the newest finished run of `SHERIFF_DEPLOY_WORKFLOW` on the default branch (skipped
+and cancelled runs aside) did not succeed, every pull request waits until a deploy succeeds, and a failed deploy of the
+default branch's head fails them all. A version or health endpoint that is not 200, or a count Sheriff cannot read,
+also blocks every pull request. `SHERIFF_OVERRIDE` lets one pull request, such as a revert, merge past a full bundle
+or a failed deploy.
+
+Nothing caps a bundle when Sheriff has nothing to count from: neither `SHERIFF_VERSION_URL` nor
+`SHERIFF_DEPLOY_WORKFLOW` is set (`gh sheriff doctor` warns about that), or only the deploy workflow is set and it has
+no successful run on the default branch yet. With squash merges one pull request is one commit; with merge commits or
+rebase merges a bundle fills sooner.
 
 **The trade-off.** Each pull request in a bundle is still planned, reviewed and tested on its own; the rest of the gate
 is unchanged. The combination is tested only after it merges, by the default branch's CI and the deploy's health
@@ -274,7 +282,7 @@ All settings are repository variables. All are optional.
 | `SHERIFF_VERSION_URL` | none | A URL returning JSON with the deployed commit as `sha`. Used for `Merge gate` and Released |
 | `SHERIFF_HEALTH_URL` | none | `Merge gate` fails unless this URL returns 200 |
 | `SHERIFF_DEPLOY_WORKFLOW` | none | Deploy workflow file. `Merge gate` fails if its last run failed |
-| `SHERIFF_OVERRIDE` | none | A pull request number that may merge despite failing production checks |
+| `SHERIFF_OVERRIDE` | none | A pull request number that may merge despite failing production checks or a full bundle |
 | `SHERIFF_MERGE_MODE` | `serial` | `bundle` lets up to `SHERIFF_BUNDLE_MAX` merged pull requests wait for one deploy. Anything else means serial (see [Merges](#merges)) |
 | `SHERIFF_BUNDLE_MAX` | `5` | Merged pull requests one deploy may carry in bundle mode. A value that is not a whole number of at least 1 means 5 |
 | `SHERIFF_ACK_AUTHORS` | none | Logins, other than bots, that count as agents when replying to comments, and as trusted authors for planning |
