@@ -240,9 +240,12 @@ def labeled_by_admin(number):
     labeled = [event for event in events if isinstance(event, dict) and event.get("event") == "labeled"
                and str((event.get("label") or {}).get("name") or "").lower() == planner.NO_PLAN_LABEL]
     login = str(((labeled[-1].get("actor") if labeled else None) or {}).get("login") or "")
-    if not login:
+    if not login or login.endswith("[bot]"):
         return False
-    permission = gh_json(["api", "repos/{owner}/{repo}/collaborators/" + login + "/permission"])
+    try:
+        permission = gh_json(["api", "repos/{owner}/{repo}/collaborators/" + login + "/permission"])
+    except GateError:
+        return False
     return isinstance(permission, dict) and permission.get("role_name") == "admin"
 
 

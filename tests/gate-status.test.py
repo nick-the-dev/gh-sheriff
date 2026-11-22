@@ -170,7 +170,7 @@ class PlanGateTests(unittest.TestCase):
     ROLES = {"chief": "admin", "boss": "maintain"}
 
     def judge(self, plan_on=True, plan=1, plan_author="gate", reviewed_keys=(), created="2026-11-22T10:00:00Z",
-              title="fix(x): y (LOGIN-FIX)", refs=None, labels=(), labeled_by="", comments=()):
+              title="fix(x): y (LOGIN-FIX)", refs=None, labels=(), labeled_by="", comments=(), listing=(), no_permission=()):
         reads = []
         refs = [{"number": 12, "repository": {"owner": {"login": "o"}, "name": "r"}}] if refs is None else refs
         view = {"state": "OPEN", "headRefOid": HEAD, "baseRefName": "main", "title": title, "createdAt": created,
@@ -191,9 +191,15 @@ class PlanGateTests(unittest.TestCase):
                 return view
             if args[1] == "graphql":
                 reads.append(args)
+                number = int(args[args.index("-F") + 1].split("=")[1])
+                issue["data"]["repository"]["issue"]["number"] = number
                 return issue
             joined = " ".join(args)
+            if "--slurp" in args:
+                return [list(listing)]
             if "/permission" in joined:
+                if args[1].split("/")[-2] in no_permission:
+                    raise status.GateError("gh api failed: 404")
                 return {"role_name": self.ROLES.get(args[1].split("/")[-2], "read")}
             if "check-runs" in joined:
                 return runs
@@ -238,6 +244,16 @@ class PlanGateTests(unittest.TestCase):
         self.assertEqual(state, "success")
         self.assertTrue(description.endswith("; no plan needed (sheriff:no-plan)"))
         self.assertEqual(self.judge(plan=None, labels=["sheriff:no-plan"], labeled_by="boss")[0], "pending")
+
+    def test_a_labeler_whose_permission_cannot_be_read_is_ignored(self):
+        state, description, _ = self.judge(plan=None, labels=["sheriff:no-plan"], labeled_by="app[bot]", no_permission=("app[bot]",))
+        self.assertEqual((state, description), ("pending", "needs a Sheriff plan on #12"))
+
+    def test_a_task_issue_found_by_the_pull_request_title(self):
+        found = {"title": "fix(x): y (ABC-1)", "refs": [], "listing": [{"number": 15, "title": "ABC-1: something"}]}
+        self.assertEqual(self.judge(plan=None, **found)[:2], ("pending", "needs a Sheriff plan on #15"))
+        self.assertEqual(self.judge(plan=1, **found)[:2], ("pending", "needs a Sheriff review against plan v1 on #15"))
+        self.assertEqual(self.judge(plan=1, reviewed_keys=[BASE + "/plan-1"], **found)[0], "success")
 
     def test_an_unreadable_plan_is_pending_not_an_error(self):
         with mock.patch.object(status.planner, "read_issue", side_effect=status.planner.PlanError("bad")):
