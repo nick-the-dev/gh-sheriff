@@ -64,7 +64,9 @@ flowchart TD
     X --> A
     C -->|clean| D["3. Merge gate: comments answered, production healthy"]
     D --> E["4. GitHub merges it"]
-    E --> F["5. Your deploy ships it, the task is marked Verified"]
+    E --> F["5. Your deploy ships it"]
+    F --> G["6. Released: production runs the change"]
+    G --> H["7. Verified in production: checked live, evidence recorded"]
 ```
 
 1. **Cheap review.** A low-cost model reviews every new push. Docs-only changes stop here.
@@ -72,7 +74,11 @@ flowchart TD
 3. **Merge gate.** Every comment from a person needs an agent's answer, and production must be healthy (if you
    configured it).
 4. **Merge.** GitHub merges the pull request as soon as everything is green. Nobody can bypass this, admins included.
-5. **Ship and verify.** Your deploy runs as usual, and the task's issue moves to Released, then Verified.
+5. **Deploy.** Your own deploy workflow runs as usual and tells Sheriff when it is done.
+6. **Released.** Sheriff sees that production serves the merged commit and moves the task to Released.
+7. **Verified.** An agent (or a person) exercises the change in production and records what it saw with
+   `gh sheriff task verify`. The task becomes Verified and its issue closes. Work marked "Release only" needs no live
+   check and is verified as soon as it is released.
 
 Each review round is counted before the AI starts. Cancelling or re-running a review never buys an extra attempt.
 
