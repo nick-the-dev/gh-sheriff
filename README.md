@@ -36,6 +36,11 @@ gh sheriff install
 
 ```mermaid
 flowchart TB
+    subgraph PLAN["Plan every task"]
+        direction LR
+        I["Task issue opened"] --> P["Opus writes the plan"] --> W["Agent works to the plan"]
+        W -->|"plan cannot work"| R["/sheriff replan"] --> P
+    end
     subgraph REVIEW["Review every push"]
         direction LR
         A["Agent pushes"] --> B["Cheap AI review"] -->|clean| C["Smart AI review"]
@@ -47,6 +52,7 @@ flowchart TB
         direction LR
         D["Merge gate"] --> E["GitHub merges"] --> F["Deploy"] --> G["Released"] --> H["Verified in production"]
     end
+    PLAN --> REVIEW
     REVIEW -->|clean| SHIP
 ```
 
@@ -57,7 +63,7 @@ flowchart TB
    that only touch docs stop here.
 3. If the cheap review is clean, Claude Opus reviews the same diff.
 4. The `Merge gate` check passes when these hold:
-   - the task issue has a current Sheriff plan, if planning is on;
+   - the task issue has a current Sheriff plan and the `Review` was made against that plan version, if planning is on;
    - every comment from a person has an agent reply (a comment that is only a Sheriff command, such as `/sheriff review`, needs none);
    - production is healthy, if you configured a health check.
 
