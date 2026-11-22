@@ -1,12 +1,19 @@
-<p align="center"><img src="assets/sheriff.png" alt="Sheriff" width="128"></p>
+<p align="center">
+  <img src="assets/sheriff.png" alt="Sheriff" width="128">
+</p>
 
-# Sheriff
+<h1 align="center">Sheriff</h1>
 
-A GitHub CLI extension that reviews every pull request with AI in CI, and only lets it merge when the review passes.
+<p align="center">
+  A GitHub CLI extension that reviews every pull request with AI in CI,<br>
+  and only lets it merge when the review passes.
+</p>
 
-[![CI](https://github.com/nick-the-dev/gh-sheriff/actions/workflows/ci.yml/badge.svg)](https://github.com/nick-the-dev/gh-sheriff/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![gh extension](https://img.shields.io/badge/gh-extension-black?logo=github)](https://cli.github.com/manual/gh_extension)
+<p align="center">
+  <a href="https://github.com/nick-the-dev/gh-sheriff/actions/workflows/ci.yml"><img src="https://github.com/nick-the-dev/gh-sheriff/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
+  <a href="https://cli.github.com/manual/gh_extension"><img src="https://img.shields.io/badge/gh-extension-black?logo=github" alt="gh extension"></a>
+</p>
 
 Sheriff is for repositories where AI agents open pull requests. One command sets up:
 
