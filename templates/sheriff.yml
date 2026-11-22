@@ -105,6 +105,7 @@ jobs:
       attempt: ${{ steps.reserve.outputs.attempt }}
       plan_issue: ${{ steps.reserve.outputs.plan_issue }}
       plan_version: ${{ steps.reserve.outputs.plan_version }}
+      plan_id: ${{ steps.reserve.outputs.plan_id }}
       app: ${{ steps.reserve.outputs.app }}
     steps:
       - name: Count the round as the gate App before any model runs
@@ -158,6 +159,7 @@ jobs:
           opencode-key: ${{ secrets.OPENCODE_API_KEY }}
           plan-issue: ${{ needs.reserve.outputs.plan_issue }}
           plan-version: ${{ needs.reserve.outputs.plan_version }}
+          plan-id: ${{ needs.reserve.outputs.plan_id }}
           app: ${{ needs.reserve.outputs.app }}
 
   post:
@@ -270,6 +272,7 @@ jobs:
           issue: ${{ github.event.issue.number || inputs.plan_issue }}
           request: ${{ needs.plan-reserve.outputs.request }}
           app: ${{ needs.plan-reserve.outputs.app }}
+          comment-id: ${{ needs.plan-reserve.outputs.comment_id }}
           ack-authors: ${{ vars.SHERIFF_ACK_AUTHORS }}
           model: ${{ vars.SHERIFF_PLAN_MODEL || 'claude:claude-opus-5-5' }}
           turns: ${{ vars.SHERIFF_PLAN_TURNS || '40' }}

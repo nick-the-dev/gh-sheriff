@@ -10,6 +10,9 @@ inputs:
   app:
     description: The gate App's slug from the plan-reserve job
     required: true
+  comment-id:
+    description: The reservation comment from the plan-reserve job; the planner runs only while it is still open
+    required: true
   ack-authors:
     description: Logins besides bots, maintainers and admins whose comments reach the planner, comma-separated
     required: false
@@ -63,10 +66,11 @@ runs:
         ISSUE: ${{ inputs.issue }}
         REQUEST: ${{ inputs.request }}
         APP: ${{ inputs.app }}
+        COMMENT_ID: ${{ inputs.comment-id }}
         SHERIFF_ACK_AUTHORS: ${{ inputs.ack-authors }}
         SHERIFF: ${{ github.action_path }}/../..
       run: |
-        python3 -I "$SHERIFF/scripts/plan.py" prepare --issue "$ISSUE" --request "$REQUEST" --app "$APP" \
+        python3 -I "$SHERIFF/scripts/plan.py" prepare --issue "$ISSUE" --request "$REQUEST" --app "$APP" --comment-id "$COMMENT_ID" \
           --ack-authors "$SHERIFF_ACK_AUTHORS" --checkout base --out plan
     - name: Set up Node.js for the planner CLIs (self-hosted runners may not have it)
       uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0

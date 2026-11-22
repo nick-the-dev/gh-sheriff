@@ -83,10 +83,10 @@ def reviewed(head, key, slug):
 def pr_plan(view, slug):
     issue = planner.task_issue(view, os.environ["GH_REPO"], gh_json)
     found = issue and planner.current_plan(issue["comments"], slug)
-    return (issue["number"], found["version"]) if found else (0, 0)
+    return (issue["number"], found["version"], found["id"]) if found else (0, 0, 0)
 
 
-def prepare(number, checkout, out, default_branch, head, base_sha, plan_issue=0, plan_version=0, app=""):
+def prepare(number, checkout, out, default_branch, head, base_sha, plan_issue=0, plan_version=0, app="", plan_id=0):
     if run(["git", "rev-parse", "HEAD"], cwd=checkout).strip() != head or \
             run(["git", "merge-base", "origin/" + default_branch, "HEAD"], cwd=checkout).strip() != base_sha:
         return output(skip="head moved", pr=number, head=head, base=base_sha)
@@ -94,7 +94,7 @@ def prepare(number, checkout, out, default_branch, head, base_sha, plan_issue=0,
     if plan_issue:
         issue = planner.read_issue(plan_issue, gh_json)
         current = issue and planner.current_plan(issue["comments"], app)
-        if not current or current["version"] != plan_version:
+        if not current or current["version"] != plan_version or current["id"] != plan_id:
             return output(skip="plan moved", pr=number, head=head, base=base_sha)
     view = gh_json(["pr", "view", str(number), "--json", "title,body,url"])
     diff = run(["git", "diff", "--no-color", "--stat", "--patch", base_sha + "..HEAD"], cwd=checkout)
@@ -192,10 +192,11 @@ def verdict_of(text):
     return match.group(1).lower(), "\n".join(lines[:-1]).strip()[:COMMENT_LIMIT]
 
 
-def review_run(pr, head, base_sha, workdir, prompt, first_spec, final_spec, first_rounds, final_rounds, counts, docs, runner=None, plan_version=0):
+def review_run(pr, head, base_sha, workdir, prompt, first_spec, final_spec, first_rounds, final_rounds, counts, docs, runner=None, plan_version=0,
+               plan_id=0):
     runner = runner or reviewers.run
     steps = plan(counts, first_spec, docs, first_rounds, final_rounds)
-    record = {"pr": int(pr), "head": head, "base": base_sha, "usage": [], "docs_only": docs, "plan": plan_version}
+    record = {"pr": int(pr), "head": head, "base": base_sha, "usage": [], "docs_only": docs, "plan": plan_version, "plan_id": plan_id}
     if counts.get("edited"):
         return dict(record, stage="budget", model="none", verdict="blocked",
                     body="An earlier Sheriff review on this pull request was edited, so the rounds already used cannot be counted. "
@@ -221,7 +222,7 @@ def reserve(args):
     if not login:
         raise ReviewError("GH_ACTOR_LOGIN is not set: run review.py reserve through app-token.py as the gate App")
     slug, planning = bare(login), planner.planning_on(args.plan)
-    empty = {"head": "", "base": "", "review_id": "", "counts": "", "plan_issue": 0, "plan_version": 0, "app": slug}
+    empty = {"head": "", "base": "", "review_id": "", "counts": "", "plan_issue": 0, "plan_version": 0, "plan_id": 0, "app": slug}
     view = gh_json(["pr", "view", str(args.pr), "--json", "state,isDraft,baseRefName,headRefOid" + (",title,closingIssuesReferences" if planning else "")])
     if str(view.get("state") or "").upper() != "OPEN":
         return output(skip="not open", **empty)
@@ -236,15 +237,15 @@ def reserve(args):
     base_sha = str((compare.get("merge_base_commit") or {}).get("sha") or "")
     if not SHA.fullmatch(base_sha):
         raise ReviewError("the merge base is malformed")
-    plan_issue, plan_version = 0, 0
+    plan_issue, plan_version, plan_id = 0, 0, 0
     if planning:
         try:
-            plan_issue, plan_version = pr_plan(view, slug)
+            plan_issue, plan_version, plan_id = pr_plan(view, slug)
         except planner.PlanError:
             known = planner.closing(view.get("closingIssuesReferences"), os.environ["GH_REPO"])
             return output(skip="could not read the plan on #" + str(known[0] if known else args.pr), **dict(empty, head=head, base=base_sha))
-    empty = dict(empty, head=head, base=base_sha, plan_issue=plan_issue, plan_version=plan_version)
-    if reviewed(head, planner.review_key(base_sha, plan_version), slug):
+    empty = dict(empty, head=head, base=base_sha, plan_issue=plan_issue, plan_version=plan_version, plan_id=plan_id)
+    if reviewed(head, planner.review_key(base_sha, plan_version, plan_id), slug):
         return output(skip="already reviewed at this head and base", **empty)
     listed = tuple(name.strip().lower() for name in (args.unlock_authors or "").split(",") if name.strip())
     counts = history(args.pr, slug, listed)
@@ -255,7 +256,7 @@ def reserve(args):
     packed = json.dumps(counts, separators=(",", ":"))
     if counts["edited"] or not (steps["first"] or steps["final"]):
         record = review_run(args.pr, head, base_sha, "", "", first_spec, final_spec, args.first_rounds, args.final_rounds, counts, False,
-                            plan_version=plan_version)
+                            plan_version=plan_version, plan_id=plan_id)
         with tempfile.TemporaryDirectory() as folder:
             path = pathlib.Path(folder) / "verdict.json"
             path.write_text(json.dumps(record))
@@ -289,7 +290,7 @@ def run_reviews(args):
                         reviewers.parse_spec(args.first_pass), reviewers.parse_spec(args.final) or DEFAULT_FINAL,
                         args.first_rounds, args.final_rounds, round_counts(args.counts),
                         docs_only(run(["git", "diff", "--name-status", "--no-renames", args.base + "..HEAD"], cwd=args.checkout)),
-                        plan_version=args.plan_version)
+                        plan_version=args.plan_version, plan_id=args.plan_id)
     pathlib.Path(args.out).write_text(json.dumps(record))
     return output(verdict=record["verdict"], stage=record["stage"], pr=args.pr, head=args.head)
 
@@ -313,9 +314,11 @@ def post(path, default_branch, review_id=""):
         raise ReviewError("the model name is malformed")
     if review_id and not re.fullmatch(r"[0-9]{1,20}", str(review_id)):
         raise ReviewError("the review id is malformed")
-    plan_version = record.get("plan", 0)
+    plan_version, plan_id = record.get("plan", 0), record.get("plan_id", 0)
     if type(plan_version) is not int or plan_version < 0:
         raise ReviewError("the plan version is malformed")
+    if type(plan_id) is not int or plan_id < 0 or (plan_id > 0) != (plan_version > 0):
+        raise ReviewError("the plan comment id is malformed")
     slug = bare(os.environ.get("GH_ACTOR_LOGIN", "").strip())
     if not slug:
         raise ReviewError("GH_ACTOR_LOGIN is not set: run review.py post through app-token.py as the gate App")
@@ -338,7 +341,7 @@ def post(path, default_branch, review_id=""):
             + ([] if moved else ["-f", "commit_id=" + record["head"]]))
     if moved:
         return output(posted="false", reason="head moved; the round is recorded")
-    key = planner.review_key(record["base"], plan_version)
+    key = planner.review_key(record["base"], plan_version, plan_id)
     if reviewed(record["head"], key, slug):
         return output(posted="false", reason="this head and base already have a Review verdict")
     check = pathlib.Path(path).with_suffix(".check.json")
@@ -374,6 +377,7 @@ def main(argv=None):
     p.add_argument("--plan-issue", type=int, default=0)
     p.add_argument("--plan-version", type=int, default=0)
     p.add_argument("--app", default="")
+    p.add_argument("--plan-id", type=int, default=0)
     r = sub.add_parser("run")
     r.add_argument("--pr", type=int, required=True)
     r.add_argument("--head", required=True)
@@ -388,6 +392,7 @@ def main(argv=None):
     r.add_argument("--out", required=True)
     r.add_argument("--counts", required=True)
     r.add_argument("--plan-version", type=int, default=0)
+    r.add_argument("--plan-id", type=int, default=0)
     s = sub.add_parser("post")
     s.add_argument("--verdict", required=True)
     s.add_argument("--default-branch", required=True)
@@ -398,7 +403,7 @@ def main(argv=None):
             reserve(args)
         elif args.command == "prepare":
             prepare(args.pr, args.checkout, pathlib.Path(args.out), args.default_branch, args.head, args.base,
-                    args.plan_issue, args.plan_version, args.app)
+                    args.plan_issue, args.plan_version, args.app, args.plan_id)
         elif args.command == "run":
             run_reviews(args)
         else:

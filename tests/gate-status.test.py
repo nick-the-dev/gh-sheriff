@@ -170,15 +170,16 @@ class PlanGateTests(unittest.TestCase):
     ROLES = {"chief": "admin", "boss": "maintain"}
 
     def judge(self, plan_on=True, plan=1, plan_author="gate", reviewed_keys=(), created="2026-11-22T10:00:00Z",
-              title="fix(x): y (LOGIN-FIX)", refs=None, labels=(), labeled_by="", comments=(), listing=(), no_permission=(), switch=None):
-        reads = []
+              title="fix(x): y (LOGIN-FIX)", refs=None, labels=(), labeled_by="", comments=(), listing=(), no_permission=(), switch=None,
+              plan_id=1):
+        reads, self.fields = [], []
         refs = [{"number": 12, "repository": {"owner": {"login": "o"}, "name": "r"}}] if refs is None else refs
         view = {"state": "OPEN", "headRefOid": HEAD, "baseRefName": "main", "title": title, "createdAt": created,
                 "labels": [{"name": name} for name in labels], "closingIssuesReferences": refs}
         notes = []
         if plan:
             body = "<!-- sheriff-plan v=" + str(plan) + " base=" + BASE + " -->\nplan"
-            notes.append({"databaseId": 1, "body": body, "createdAt": "2026-11-22T09:00:00Z",
+            notes.append({"databaseId": plan_id, "body": body, "createdAt": "2026-11-22T09:00:00Z",
                           "author": {"login": plan_author, "__typename": "Bot" if plan_author == "gate" else "User"}})
         issue = {"data": {"repository": {"issue": {"number": 12, "title": "LOGIN-FIX: fix login", "body": "", "state": "OPEN",
                  "author": {"login": "owner", "__typename": "User"}, "labels": {"nodes": []},
@@ -188,6 +189,7 @@ class PlanGateTests(unittest.TestCase):
 
         def fake_gh_json(args):
             if args[0] == "pr":
+                self.fields.append(args[args.index("--json") + 1])
                 return view
             if args[1] == "graphql":
                 reads.append(args)
@@ -221,6 +223,12 @@ class PlanGateTests(unittest.TestCase):
         self.assertEqual(state, "success")
         self.assertEqual(reads, [])
 
+    def test_without_planning_on_the_pull_request_fields_are_the_ones_read_before_planning(self):
+        self.judge(plan_on=False, plan=None)
+        self.assertEqual(self.fields, ["state,headRefOid,baseRefName"])
+        self.judge(plan=None)
+        self.assertEqual(self.fields, ["state,headRefOid,baseRefName,title,createdAt,labels,closingIssuesReferences"])
+
     def test_the_plan_switch_ignores_case_like_the_workflow_condition(self):
         for value in ("ON", " On "):
             with self.subTest(value=value):
@@ -234,10 +242,20 @@ class PlanGateTests(unittest.TestCase):
         self.assertEqual(self.judge(plan=1, plan_author="writer")[:2], ("pending", "needs a Sheriff plan on #12"))
 
     def test_a_current_plan_without_a_review_against_it_is_pending(self):
-        self.assertEqual(self.judge(plan=2, reviewed_keys=[BASE, BASE + "/plan-1"])[:2], ("pending", "needs a Sheriff review against plan v2 on #12"))
+        self.assertEqual(self.judge(plan=2, reviewed_keys=[BASE, BASE + "/plan-1.1", BASE + "/plan-2"])[:2],
+                         ("pending", "needs a Sheriff review against plan v2 on #12"))
 
     def test_a_reviewed_current_plan_passes(self):
-        self.assertEqual(self.judge(plan=2, reviewed_keys=[BASE + "/plan-2"])[0], "success")
+        self.assertEqual(self.judge(plan=2, reviewed_keys=[BASE + "/plan-2.1"])[0], "success")
+
+    def test_a_review_against_another_issues_plan_at_the_same_version_does_not_count(self):
+        relinked = {"refs": [{"number": 15, "repository": {"owner": {"login": "o"}, "name": "r"}}], "plan_id": 2}
+        self.assertEqual(self.judge(plan=1, reviewed_keys=[BASE + "/plan-1.1"], **relinked)[:2], ("pending", "needs a Sheriff review against plan v1 on #15"))
+        self.assertEqual(self.judge(plan=1, reviewed_keys=[BASE + "/plan-1.2"], **relinked)[0], "success")
+
+    def test_a_review_against_a_deleted_and_rewritten_plan_at_the_same_version_does_not_count(self):
+        self.assertEqual(self.judge(plan=1, plan_id=7, reviewed_keys=[BASE + "/plan-1.1"])[:2], ("pending", "needs a Sheriff review against plan v1 on #12"))
+        self.assertEqual(self.judge(plan=1, plan_id=7, reviewed_keys=[BASE + "/plan-1.7"])[0], "success")
 
     def test_a_pull_request_opened_before_planning_started_is_exempt(self):
         self.assertEqual(self.judge(plan=None, created="2026-11-21T23:00:00Z")[0], "success")
@@ -263,7 +281,7 @@ class PlanGateTests(unittest.TestCase):
         found = {"title": "fix(x): y (ABC-1)", "refs": [], "listing": [{"number": 15, "title": "ABC-1: something"}]}
         self.assertEqual(self.judge(plan=None, **found)[:2], ("pending", "needs a Sheriff plan on #15"))
         self.assertEqual(self.judge(plan=1, **found)[:2], ("pending", "needs a Sheriff review against plan v1 on #15"))
-        self.assertEqual(self.judge(plan=1, reviewed_keys=[BASE + "/plan-1"], **found)[0], "success")
+        self.assertEqual(self.judge(plan=1, reviewed_keys=[BASE + "/plan-1.1"], **found)[0], "success")
 
     def test_an_unreadable_plan_is_pending_not_an_error(self):
         with mock.patch.object(status.planner, "read_issue", side_effect=status.planner.PlanError("bad")):

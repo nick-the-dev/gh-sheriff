@@ -45,6 +45,10 @@ inputs:
     description: The plan version the reserve job keyed this round to (0 when none)
     required: false
     default: "0"
+  plan-id:
+    description: The plan comment the reserve job keyed this round to (0 when none)
+    required: false
+    default: "0"
   app:
     description: The gate App's slug from the reserve job (whose plan comments count)
     required: false
@@ -88,11 +92,12 @@ runs:
         DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         PLAN_ISSUE: ${{ inputs.plan-issue }}
         PLAN_VERSION: ${{ inputs.plan-version }}
+        PLAN_ID: ${{ inputs.plan-id }}
         APP: ${{ inputs.app }}
         SHERIFF: ${{ github.action_path }}/../..
       run: |
         python3 -I "$SHERIFF/scripts/review.py" prepare --pr "$PR" --checkout pr --out review --default-branch "$DEFAULT_BRANCH" \
-          --head "$HEAD_SHA" --base "$BASE_SHA" --plan-issue "$PLAN_ISSUE" --plan-version "$PLAN_VERSION" --app "$APP"
+          --head "$HEAD_SHA" --base "$BASE_SHA" --plan-issue "$PLAN_ISSUE" --plan-version "$PLAN_VERSION" --plan-id "$PLAN_ID" --app "$APP"
     - name: Set up Node.js for the reviewer CLIs (self-hosted runners may not have it)
       uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
       with:
@@ -113,12 +118,13 @@ runs:
         FIRST_ROUNDS: ${{ inputs.first-rounds }}
         FINAL_ROUNDS: ${{ inputs.final-rounds }}
         PLAN_VERSION: ${{ inputs.plan-version }}
+        PLAN_ID: ${{ inputs.plan-id }}
         SHERIFF: ${{ github.action_path }}/../..
       run: |
         python3 -I "$SHERIFF/scripts/review.py" run --pr "$PR" --head "$HEAD_SHA" --base "$BASE_SHA" --checkout pr \
           --workdir . --prompt "$SHERIFF/prompts/review.md" --first-pass "$FIRST_PASS" --final "$FINAL" \
           --first-rounds "$FIRST_ROUNDS" --final-rounds "$FINAL_ROUNDS" --out review/verdict.json --counts "$COUNTS" \
-          --plan-version "$PLAN_VERSION"
+          --plan-version "$PLAN_VERSION" --plan-id "$PLAN_ID"
     - name: Keep the verdict for the posting job
       if: steps.prepare.outputs.skip == ''
       uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

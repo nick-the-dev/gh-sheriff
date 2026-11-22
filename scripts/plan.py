@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Sheriff plan: the facts the planner shares, namely the comment markers, an issue read with its comments, the
 App's current plan on a task issue, the task issue of a pull request, the pull requests linked to an issue and the
-review keys that bind a review to a plan version; who may ask for a plan, the budget, the reservation comment that
-the gate App posts before any model runs, and the same decision rechecked after a post for a command that arrived
-meanwhile; and writing the plan: the issue prepared as data, the read-only model run, and the post that turns the
-reservation into the plan or a failure note and marks the old version superseded."""
+review keys that bind a review to one plan by its version and comment; who may ask for a plan, the budget, the
+reservation comment that the gate App posts before any model runs, and the same decision rechecked after a post for a
+command that arrived meanwhile; and writing the plan: the issue prepared as data, the read-only model run, and the post
+that turns the reservation into the plan or a failure note and marks the old version superseded."""
 import argparse
 import datetime
 import importlib.util
@@ -154,6 +154,13 @@ def current_plan(comments, slug):
     return None if newest is None or newest["superseded"] or newest["tampered"] else newest
 
 
+def open_reservation(comments, comment_id, version, slug):
+    held = next((c for c in comments if str(c["id"]) == str(comment_id)), None)
+    marker = START_MARKER.match(first_line(held["body"])) if held else None
+    return bool(held and held["bot"] and bare(held["author"]) == slug and marker and marker.group(1) == str(version)
+                and not (held["edited"] and bare(held["editor"]) != slug))
+
+
 def in_repo(ref, repo):
     target = (ref.get("repository") or {})
     return (((target.get("owner") or {}).get("login") or "") + "/" + (target.get("name") or "")).lower() == repo.lower()
@@ -189,12 +196,12 @@ def planning_on(value):
     return str(value or "").strip().lower() == "on"
 
 
-def review_key(base, version):
-    return base + KEY_SEPARATOR + str(version) if version else base
+def review_key(base, version, plan_id=0):
+    return base + KEY_SEPARATOR + str(version) + "." + str(plan_id) if version else base
 
 
-def keyed_to(external_id, version):
-    return str(external_id or "").endswith(KEY_SEPARATOR + str(version))
+def keyed_to(external_id, version, plan_id):
+    return str(external_id or "").partition(KEY_SEPARATOR)[2] == str(version) + "." + str(plan_id)
 
 
 def escape(text):
@@ -206,9 +213,10 @@ def supersede(body, newer):
     return head.rstrip().removesuffix("-->").rstrip() + " superseded-by=" + str(newer) + " -->\n**Superseded by v" + str(newer) + ".**\n" + rest
 
 
-def failure_note(version, why):
+def failure_note(version, why, planned=False):
+    retry = "`/sheriff replan <reason>`" if planned else "`/sheriff plan` (or `/sheriff replan <reason>`)"
     return ("<!-- sheriff-plan-failed v=" + str(version) + " -->\nSheriff could not write plan v" + str(version) + ": "
-            + escape(str(why))[:FAILURE_LIMIT] + ". Comment `/sheriff plan` (or `/sheriff replan <reason>`) to try again.")
+            + escape(str(why))[:FAILURE_LIMIT] + ". Comment " + retry + " to try again.")
 
 
 def usage_of(body):
@@ -409,6 +417,8 @@ def prepare(args):
     newer = max((item["version"] for item in plans(issue["comments"], args.app)), default=0)
     if newer >= version:
         return skip("plan v" + str(newer) + " already exists")
+    if not open_reservation(issue["comments"], args.comment_id, version, args.app):
+        return skip("the reservation of plan v" + str(version) + " is no longer open")
     base = run(["git", "rev-parse", "HEAD"], cwd=args.checkout).strip()
     role, ack = make_role(), logins(args.ack_authors)
     shown = [{"author": c["author"], "created": c["created"], "body": c["body"][:COMMENT_LIMIT]} for c in issue["comments"]
@@ -467,10 +477,7 @@ def post(args):
         raise PlanError("GH_ACTOR_LOGIN is not set: run plan.py post through app-token.py as the gate App")
     slug = bare(login)
     issue = read_issue(args.issue, gh_json)
-    held = next((c for c in (issue or {}).get("comments", []) if str(c["id"]) == str(args.comment_id)), None)
-    marker = START_MARKER.match(first_line(held["body"])) if held else None
-    if not (held and held["bot"] and bare(held["author"]) == slug and marker and marker.group(1) == str(args.version)
-            and not (held["edited"] and bare(held["editor"]) != slug)):
+    if not open_reservation((issue or {}).get("comments", []), args.comment_id, args.version, slug):
         raise PlanError("comment " + str(args.comment_id) + " is not this run's open reservation; nothing is posted")
     refused = ""
     try:
@@ -483,14 +490,14 @@ def post(args):
     newer = max((item["version"] for item in plans(issue["comments"], slug)), default=0)
     if not why and newer >= args.version:
         why = "overtaken by plan v" + str(newer)
+    old = current_plan(issue["comments"], slug)
     if why:
-        patch_comment(args.comment_id, failure_note(args.version, why))
+        patch_comment(args.comment_id, failure_note(args.version, why, bool(old)))
         output(posted="false", prs="")
         if refused:
             raise PlanError("the record is refused: " + refused)
         return
     patch_comment(args.comment_id, plan_comment(record))
-    old = current_plan(issue["comments"], slug)
     if old:
         try:
             patch_comment(old["id"], supersede(old["body"], args.version))
@@ -524,6 +531,7 @@ def main(argv=None):
     q.add_argument("--issue", type=int, required=True)
     q.add_argument("--request", required=True)
     q.add_argument("--app", required=True)
+    q.add_argument("--comment-id", required=True)
     q.add_argument("--ack-authors", default="")
     q.add_argument("--checkout", required=True)
     q.add_argument("--out", required=True)

@@ -249,11 +249,11 @@ def labeled_by_admin(number):
     return isinstance(permission, dict) and permission.get("role_name") == "admin"
 
 
-def plan_reviewed(head, slug, version):
+def plan_reviewed(head, slug, plan):
     data = gh_json(["api", "repos/{owner}/{repo}/commits/" + head + "/check-runs?check_name=Review&per_page=100"])
     runs = data.get("check_runs") if isinstance(data, dict) else None
     return any(isinstance(check, dict) and planner.bare((check.get("app") or {}).get("slug")) == slug
-               and check.get("status") == "completed" and planner.keyed_to(check.get("external_id"), version)
+               and check.get("status") == "completed" and planner.keyed_to(check.get("external_id"), plan["version"], plan["id"])
                for check in runs or [])
 
 
@@ -278,13 +278,14 @@ def plan_gate(number, view, slug):
     current = planner.current_plan(issue["comments"], slug)
     if not current:
         return "needs a Sheriff plan on " + where, ""
-    if not plan_reviewed(str(view.get("headRefOid") or ""), slug, current["version"]):
+    if not plan_reviewed(str(view.get("headRefOid") or ""), slug, current):
         return "needs a Sheriff review against plan v" + str(current["version"]) + " on " + where, ""
     return "", ""
 
 
 def judge(number, prod_failures, listed, override, dry_run, prod_checked=True, default_branch="", quiet=False):
-    view = gh_json(["pr", "view", str(number), "--json", "state,headRefOid,baseRefName,title,createdAt,labels,closingIssuesReferences"])
+    planning = planner.planning_on(setting("SHERIFF_PLAN"))
+    view = gh_json(["pr", "view", str(number), "--json", "state,headRefOid,baseRefName" + (",title,createdAt,labels,closingIssuesReferences" if planning else "")])
     head = str(view.get("headRefOid") or "")
     if str(view.get("state") or "").upper() != "OPEN" or len(head) != 40:
         return {"pr": number, "skipped": "not open"}

@@ -59,6 +59,9 @@ outputs:
   plan_version:
     description: The plan version the round is keyed to (0 when none)
     value: ${{ steps.reserve.outputs.plan_version }}
+  plan_id:
+    description: The plan comment the round is keyed to (0 when none)
+    value: ${{ steps.reserve.outputs.plan_id }}
   app:
     description: The gate App's slug
     value: ${{ steps.reserve.outputs.app }}

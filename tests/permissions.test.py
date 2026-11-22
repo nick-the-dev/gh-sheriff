@@ -70,6 +70,11 @@ def step_of(text, marker):
     return text[text[:text.index(marker)].rindex("    - name:"):text.index(marker)]
 
 
+def whole_step(text, marker):
+    end = text.find("\n    - name:", text.index(marker))
+    return text[text[:text.index(marker)].rindex("    - name:"):end if end != -1 else len(text)]
+
+
 class TemplatePermissionTests(unittest.TestCase):
     def test_the_workflow_grants_only_reads(self):
         self.assertNotIn("write", top_level(TEMPLATE).values())
@@ -150,7 +155,7 @@ class PlanWiringTests(unittest.TestCase):
             self.assertEqual(dict(re.findall(r"--permission (\w+)=(\w+)", mine)).get("issues"), "write")
 
     def test_the_reserve_and_review_actions_default_to_planning_off(self):
-        for name, inputs in (("reserve", {"plan": '""'}), ("review", {"plan-issue": '"0"', "plan-version": '"0"', "app": '""'})):
+        for name, inputs in (("reserve", {"plan": '""'}), ("review", {"plan-issue": '"0"', "plan-version": '"0"', "plan-id": '"0"', "app": '""'})):
             text = (ROOT / "actions" / name / "action.yml").read_text()
             for key, default in inputs.items():
                 with self.subTest(action=name, input=key):
@@ -197,10 +202,23 @@ class PlanWiringTests(unittest.TestCase):
                 self.assertIn("SHERIFF_PLAN_SINCE: ${{ vars.SHERIFF_PLAN_SINCE }}", block(TEMPLATE, job))
         reserve, review = block(TEMPLATE, "reserve"), block(TEMPLATE, "review")
         self.assertIn("plan: ${{ vars.SHERIFF_PLAN }}", reserve)
-        for output in ("plan_issue", "plan_version", "app"):
+        for output in ("plan_issue", "plan_version", "plan_id", "app"):
             self.assertIn(output + ": ${{ steps.reserve.outputs." + output + " }}", reserve)
-        for key, output in (("plan-issue", "plan_issue"), ("plan-version", "plan_version"), ("app", "app")):
+        for key, output in (("plan-issue", "plan_issue"), ("plan-version", "plan_version"), ("plan-id", "plan_id"), ("app", "app")):
             self.assertIn(key + ": ${{ needs.reserve.outputs." + output + " }}", review)
+        action = (ROOT / "actions/reserve/action.yml").read_text()
+        self.assertIn("plan_id:\n    description: The plan comment the round is keyed to (0 when none)\n    value: ${{ steps.reserve.outputs.plan_id }}", action)
+        review_action = (ROOT / "actions/review/action.yml").read_text()
+        for call in ("review.py\" prepare", "review.py\" run"):
+            with self.subTest(call=call):
+                self.assertIn('--plan-id "$PLAN_ID"', whole_step(review_action, call))
+                self.assertIn("PLAN_ID: ${{ inputs.plan-id }}", whole_step(review_action, call))
+
+    def test_the_planner_gets_its_reservation_so_a_finished_reservation_runs_no_model(self):
+        self.assertIn("comment-id: ${{ needs.plan-reserve.outputs.comment_id }}", block(TEMPLATE, "plan"))
+        step = whole_step((ROOT / "actions/plan/action.yml").read_text(), "plan.py\" prepare")
+        self.assertIn("COMMENT_ID: ${{ inputs.comment-id }}", step)
+        self.assertIn('--comment-id "$COMMENT_ID"', step)
 
     def test_plan_post_rechecks_the_issue_and_starts_a_plan_run_for_a_command_that_arrived_meanwhile(self):
         text = (ROOT / "actions/plan-post/action.yml").read_text()
