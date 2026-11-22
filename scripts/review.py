@@ -235,7 +235,9 @@ def reserve(args):
             post(path, args.default_branch)
         return output(skip="decided", head=head, base=base_sha, review_id="", counts=packed)
     stage = "first" if steps["first"] else "final"
-    body = ("Sheriff review started at head `" + head[:12] + "`: " + ("the cheap first pass runs first." if stage == "first" else "the final reviewer runs.")
+    server, repo, run_id = (os.environ.get(name, "").strip() for name in ("GITHUB_SERVER_URL", "GITHUB_REPOSITORY", "GITHUB_RUN_ID"))
+    link = " ([workflow run](" + server + "/" + repo + "/actions/runs/" + run_id + "))" if server and repo and run_id else ""
+    body = ("Sheriff review in progress at head `" + head[:12] + "`" + link
             + "\n\n<!-- sheriff-start sha=" + head + " base=" + base_sha + " plan=" + stage + " -->")
     created = gh_json(["api", "-X", "POST", "repos/{owner}/{repo}/pulls/" + str(args.pr) + "/reviews",
                        "-f", "event=COMMENT", "-f", "commit_id=" + head, "-f", "body=" + body]) or {}

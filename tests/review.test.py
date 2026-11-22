@@ -265,7 +265,8 @@ class ReserveTests(unittest.TestCase):
         self.assertEqual(json.loads(outs[-1]["counts"]), {"first": 0, "final": 1, "unlocks": 1, "edited": False})
 
     def test_a_round_is_reserved_on_the_head_before_any_model_runs(self):
-        code, outs, gh, writes = self.reserve(reviews=[gate(marker("first"))])
+        with mock.patch.dict(os.environ, {"GITHUB_RUN_ID": ""}):
+            code, outs, gh, writes = self.reserve(reviews=[gate(marker("first"))])
         self.assertEqual(writes, [])
         (post,) = self.reservations(gh)
         self.assertEqual(post[3], "repos/{owner}/{repo}/pulls/7/reviews")
@@ -273,9 +274,19 @@ class ReserveTests(unittest.TestCase):
         self.assertIn("commit_id=" + HEAD, post)
         body = next(arg for arg in post if arg.startswith("body="))
         self.assertEqual(body.splitlines()[-1], "<!-- sheriff-start sha=" + HEAD + " base=" + BASE + " plan=first -->")
-        self.assertIn("cheap first pass", body)
+        self.assertTrue(body.startswith("body=Sheriff review in progress at head `" + HEAD[:12] + "`\n"))
+        self.assertNotIn("cheap first pass", body)
         self.assertEqual(outs[-1], {"skip": "", "head": HEAD, "base": BASE, "review_id": "55",
                                     "counts": '{"first":1,"final":0,"unlocks":0,"edited":false}'})
+
+    def test_the_reservation_links_the_workflow_run_when_the_environment_names_it(self):
+        env = {"GITHUB_SERVER_URL": "https://github.com", "GITHUB_REPOSITORY": "o/r", "GITHUB_RUN_ID": "99"}
+        with mock.patch.dict(os.environ, env):
+            code, outs, gh, writes = self.reserve(reviews=[gate(marker("first"))])
+        (post,) = self.reservations(gh)
+        body = next(arg for arg in post if arg.startswith("body="))
+        self.assertEqual(body.splitlines()[0], "body=Sheriff review in progress at head `" + HEAD[:12] + "` ([workflow run](https://github.com/o/r/actions/runs/99))")
+        self.assertEqual(body.splitlines()[-1], "<!-- sheriff-start sha=" + HEAD + " base=" + BASE + " plan=first -->")
 
     def test_the_plan_names_the_final_reviewer_when_no_cheap_pass_will_run(self):
         for reviews, extra in (([gate(marker("first")) for _ in range(3)], ()), ([], ("--first-pass", ""))):
