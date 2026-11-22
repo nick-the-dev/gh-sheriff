@@ -57,16 +57,16 @@ see. The verdict is a check run that only Sheriff's App can write. A no-bypass r
 
 ```mermaid
 flowchart TD
-    A[Agent opens or updates a pull request] --> B[1. Sheriff records the review round]
-    B --> C{2. Cheap AI review}
-    C -->|problem found| X[Blocked: the agent fixes it and pushes again]
-    C -->|clean| D{3. Smart AI review}
+    A["Agent opens or updates a pull request"] --> B["1. Sheriff records the review round"]
+    B --> C{"2. Cheap AI review"}
+    C -->|problem found| X["Blocked: the agent fixes it and pushes again"]
+    C -->|clean| D{"3. Smart AI review"}
     D -->|problem found| X
     X -.-> A
-    D -->|clean| E{4. Merge gate: comments answered, production healthy}
-    E -->|yes| F[5. GitHub merges it]
-    F --> G[6. Your deploy ships it]
-    G --> H[7. The task moves to Released, then Verified]
+    D -->|clean| E{"4. Merge gate: comments answered, production healthy"}
+    E -->|yes| F["5. GitHub merges it"]
+    F --> G["6. Your deploy ships it"]
+    G --> H["7. The task moves to Released, then Verified"]
 ```
 
 1. **Record the round.** Before any AI runs, Sheriff counts the round, so a cancelled or re-run review still uses up
