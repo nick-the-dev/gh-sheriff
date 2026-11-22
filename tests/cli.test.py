@@ -274,6 +274,22 @@ class InstallCommitTests(unittest.TestCase):
         self.assertEqual(verify.call_args[0][2], "commit1")
 
 
+class InstallationTests(unittest.TestCase):
+    ORG = {"owner": "acme", "repo": "acme/web", "kind": "Organization"}
+    INSTALLATIONS = [{"installations": [{"id": 9, "app_slug": "acme-sheriff", "repository_selection": "selected"}]}]
+
+    def test_a_repository_outside_the_installation_fails_fast_with_the_settings_page(self):
+        with mock.patch.object(cli, "gh_json", side_effect=[self.INSTALLATIONS, [{"repositories": [{"full_name": "acme/other"}]}]]), \
+             mock.patch("builtins.print"), self.assertRaises(cli.SheriffError) as raised:
+            cli.ensure_installed(self.ORG, None, None, wait=False)
+        self.assertIn("/organizations/acme/settings/installations/9", str(raised.exception))
+
+    def test_a_covered_repository_passes(self):
+        with mock.patch.object(cli, "gh_json", side_effect=[self.INSTALLATIONS, [{"repositories": [{"full_name": "acme/web"}]}]]), \
+             mock.patch("builtins.print"):
+            cli.ensure_installed(self.ORG, None, None, wait=False)
+
+
 class AutoAddTests(unittest.TestCase):
     def workflows(self, enabled):
         return {"node": {"workflows": {"nodes": [{"name": "Auto-add sub-issues to project", "enabled": True},

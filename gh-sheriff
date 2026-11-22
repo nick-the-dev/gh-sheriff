@@ -254,11 +254,43 @@ def installed(app_id, pem, repo):
         return False
 
 
-def ensure_installed(info, app_id, pem):
+def app_installation(info, slug):
+    path = "/orgs/" + info["owner"] + "/installations" if info["kind"] == "Organization" else "/user/installations"
+    rows = flat_pages(gh_json(["api", "--paginate", "--slurp", path]))
+    found = next((row for page in rows for row in (page.get("installations") or []) if row.get("app_slug") == slug), None)
+    if not found:
+        return None, False
+    if found.get("repository_selection") == "all":
+        return found, True
+    repos = flat_pages(gh_json(["api", "--paginate", "--slurp", "/user/installations/" + str(found["id"]) + "/repositories"]))
+    return found, any(repo.get("full_name") == info["repo"] for page in repos for repo in (page.get("repositories") or []))
+
+
+def installation_page(info, installation):
+    if info["kind"] == "Organization":
+        return "https://github.com/organizations/" + info["owner"] + "/settings/installations/" + str(installation["id"])
+    return "https://github.com/settings/installations/" + str(installation["id"])
+
+
+def ensure_installed(info, app_id, pem, wait=True):
     slug, repo = slug_for(info["owner"]), info["repo"]
     if pem is None:
-        say("ok  gate App installation is checked by the first Sheriff run")
-        return
+        installation, covered = app_installation(info, slug)
+        if covered:
+            say("ok  " + slug + " is installed on " + repo)
+            return
+        page = installation_page(info, installation) if installation else "https://github.com/apps/" + slug + "/installations/new"
+        owner_note = " (an organisation owner has to do this)" if info["kind"] == "Organization" else ""
+        say("..  " + slug + " can't reach " + repo + " yet: on " + page + " add " + repo + " to its repositories" + owner_note)
+        if not wait:
+            raise SheriffError(slug + " is not installed on " + repo + "; add it on " + page + ", then run gh sheriff install again")
+        open_url(page)
+        for _ in range(180):
+            time.sleep(5)
+            if app_installation(info, slug)[1]:
+                say("ok  " + slug + " is installed on " + repo)
+                return
+        raise SheriffError(slug + " is not installed on " + repo + " after 15 minutes")
     if installed(app_id, pem, repo):
         say("ok  " + slug + " is installed on " + repo)
         return
@@ -270,6 +302,10 @@ def ensure_installed(info, app_id, pem):
             return
         time.sleep(5)
     raise SheriffError(slug + " is not installed on " + repo + " after 15 minutes")
+
+
+def flat_pages(pages):
+    return [page for page in (pages or []) if isinstance(page, dict)]
 
 
 def repo_variable(repo, name):
@@ -448,8 +484,12 @@ def first_run(info):
         raise SheriffError("the first Sheriff run did not start")
     conclusion = None
     for _ in range(5):
-        subprocess.run(["gh", "run", "watch", str(run_id), "--repo", repo, "--interval", "10"], capture_output=True, check=False)
-        conclusion = gh_json(["run", "view", str(run_id), "--repo", repo, "--json", "conclusion"])["conclusion"]
+        for _ in range(240):
+            view = gh_json(["run", "view", str(run_id), "--repo", repo, "--json", "status,conclusion"])
+            if view.get("status") == "completed":
+                break
+            time.sleep(5)
+        conclusion = view.get("conclusion") or "unfinished after 20 minutes"
         newer = sorted(i for i in run_ids(repo) - before if i > run_id)
         if conclusion != "cancelled" or not newer:
             break
@@ -721,7 +761,7 @@ def install(args):
     if app_id:
         set_variable(info["repo"], "SHERIFF_APP_ID", str(app_id))
     set_variable(info["repo"], "SHERIFF_APP_SLUG", slug_for(info["owner"]))
-    ensure_installed(info, app_id, pem)
+    ensure_installed(info, app_id, pem, sys.stdin.isatty() and not args.yes)
     interactive = sys.stdin.isatty() and not args.yes
     ensure_secrets(info, choose_reviewers(info, args.first_pass, args.review_model, interactive), args.rotate_secrets)
     if args.no_files and not trigger_files_current(info):
