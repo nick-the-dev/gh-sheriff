@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import datetime
 import importlib.util
+import json
 import os
 import pathlib
 import unittest
@@ -155,6 +156,166 @@ class FactsTests(unittest.TestCase):
                 {"number": 23, "title": "c", "closingIssuesReferences": [ref(12, "other/r")]},
                 {"number": 24, "title": "d (OTHER)", "closingIssuesReferences": []}]
         self.assertEqual(plan.linked_prs(12, "LOGIN-FIX", rows, "o/r"), [21, 22])
+
+ROLES = {"boss": "maintain", "chief": "admin"}
+
+
+def decide(issue, rounds=3):
+    return plan.decide(issue, APP, lambda login: ROLES.get(login, "write"), ("helper",), ("friend",), rounds, NOW)
+
+
+class DecideTests(unittest.TestCase):
+    def test_a_task_opened_by_a_maintainer_a_bot_or_a_listed_login_is_planned_at_once(self):
+        for author, bot in (("boss", False), ("chief", False), ("lane[bot]", True), ("helper", False)):
+            with self.subTest(author=author):
+                self.assertEqual({k: decide(task(author=author, bot=bot))[k] for k in ("action", "version")}, {"action": "plan", "version": 1})
+
+    def test_an_outsiders_issue_waits_for_a_trusted_command(self):
+        self.assertEqual(decide(task(author="stranger"))["why"], "waiting for /sheriff plan from a maintainer")
+        self.assertEqual(decide(task([note("stranger", "/sheriff plan")], author="stranger"))["action"], "skip")
+        self.assertEqual(decide(task([note("boss", "/sheriff plan")], author="stranger"))["action"], "plan")
+        self.assertEqual(decide(task([note("boss", "/sheriff plan", editor="boss")], author="stranger"))["action"], "skip")
+
+    def test_a_planned_issue_is_not_planned_again_without_a_replan(self):
+        self.assertEqual(decide(task([planned(1), note("boss", "/sheriff plan", "2026-11-22T11:00:00Z")]))["why"], "already planned")
+
+    def test_a_replan_from_the_trusted_set_writes_the_next_version_with_its_reason(self):
+        result = decide(task([planned(1), note("lane[bot]", "/sheriff replan the cache is shared", "2026-11-22T11:00:00Z", bot=True)]))
+        self.assertEqual((result["action"], result["version"], result["reason"], result["requester"]), ("plan", 2, "the cache is shared", "lane[bot]"))
+        self.assertEqual(decide(task([note("boss", "/sheriff replan x", "2026-11-22T09:00:00Z"), planned(1)]))["why"], "already planned")
+        self.assertEqual(decide(task([planned(1), note("stranger", "/sheriff replan x", "2026-11-22T11:00:00Z")]))["why"], "already planned")
+
+    def test_a_fresh_reservation_blocks_a_second_run_and_a_stale_one_does_not(self):
+        fresh = note(APP, "<!-- sheriff-plan-start v=1 -->\nwriting", "2026-11-22T11:45:00Z", bot=True)
+        stale = dict(fresh, created="2026-11-22T11:20:00Z")
+        self.assertEqual(decide(task([fresh]))["why"], "a plan is being written")
+        self.assertEqual(decide(task([stale]))["action"], "plan")
+
+    def test_a_command_posted_while_a_plan_was_written_is_pending_afterwards(self):
+        comments = [planned(1, "2026-11-22T09:00:00Z"), note("boss", "/sheriff replan a", "2026-11-22T10:00:00Z"),
+                    dict(planned(2, "2026-11-22T10:01:00Z"), editor=APP), note("boss", "/sheriff replan b", "2026-11-22T10:05:00Z")]
+        result = decide(task(comments))
+        self.assertEqual((result["action"], result["version"], result["reason"]), ("plan", 3, "b"))
+
+    def test_the_budget_stops_the_fourth_plan_once_and_an_unlock_allows_one_more(self):
+        used = [planned(1, "2026-11-22T08:00:00Z"), planned(2, "2026-11-22T08:30:00Z"), planned(3, "2026-11-22T09:00:00Z")]
+        replan = note("lane[bot]", "/sheriff replan again", "2026-11-22T10:00:00Z", bot=True)
+        noted = note(APP, "limit\n\n<!-- sheriff-plan-budget -->", "2026-11-22T10:01:00Z", bot=True)
+        self.assertEqual(decide(task(used + [replan]))["action"], "budget")
+        self.assertEqual(decide(task(used + [replan, noted]))["why"], "plan budget used")
+        for unlocker, action in (("boss", "plan"), ("friend", "plan"), ("lane[bot]", "skip"), ("stranger", "skip")):
+            with self.subTest(unlocker=unlocker):
+                unlock = note(unlocker, "/sheriff plan", "2026-11-22T10:05:00Z", bot=unlocker.endswith("[bot]"))
+                self.assertEqual(decide(task(used + [replan, noted, unlock]))["action"], action)
+        own = note("boss", "/sheriff replan mine", "2026-11-22T10:00:00Z")
+        self.assertEqual(decide(task(used + [own, noted, note("boss", "/sheriff plan", "2026-11-22T10:05:00Z")]))["action"], "skip")
+
+    def test_a_failure_note_is_not_a_plan_and_the_next_command_retries(self):
+        failed = note(APP, "<!-- sheriff-plan-failed v=1 -->\nno result", "2026-11-22T10:00:00Z", bot=True)
+        result = decide(task([failed, note("boss", "/sheriff plan", "2026-11-22T11:00:00Z")]))
+        self.assertEqual((result["action"], result["version"]), ("plan", 1))
+
+    def test_a_request_older_than_the_newest_sheriff_comment_is_not_answered_again(self):
+        failed = note(APP, "<!-- sheriff-plan-failed v=1 -->\nno result", "2026-11-22T10:00:00Z", bot=True)
+        self.assertEqual(decide(task([note("boss", "/sheriff plan", "2026-11-22T09:00:00Z"), failed]))["action"], "skip")
+        self.assertEqual(decide(task([failed], author="boss"))["action"], "skip")
+        self.assertEqual(decide(task([note("boss", "/sheriff replan x", "2026-11-22T09:00:00Z"), planned(1, "2026-11-22T09:30:00Z")]))["why"], "already planned")
+
+    def test_two_failures_in_a_row_act_as_the_budget_and_an_unlock_allows_a_retry(self):
+        failures = [note(APP, "<!-- sheriff-plan-failed v=1 -->\nx", "2026-11-22T10:00:00Z", bot=True),
+                    note(APP, "<!-- sheriff-plan-failed v=1 -->\nx", "2026-11-22T10:30:00Z", bot=True)]
+        request = note("boss", "/sheriff plan", "2026-11-22T11:00:00Z")
+        self.assertEqual(decide(task(failures + [request]))["action"], "budget")
+        noted = note(APP, "limit\n\n<!-- sheriff-plan-budget -->", "2026-11-22T11:01:00Z", bot=True)
+        self.assertEqual(decide(task(failures + [request, noted]))["why"], "plan budget used")
+        self.assertEqual(decide(task(failures + [request, noted, note("boss", "/sheriff plan", "2026-11-22T11:05:00Z")]))["action"], "plan")
+        self.assertEqual(decide(task(failures[:1] + [request]))["action"], "plan")
+        self.assertEqual(decide(task([failures[0], planned(1, "2026-11-22T10:15:00Z"), failures[1], request]))["action"], "skip")
+
+    def test_decisions_closed_and_untitled_issues_are_never_planned(self):
+        for issue, why in ((task(decision=True), "a decision"), (task(open=False), "closed"), (task(title="Login broken"), "not a task issue")):
+            self.assertEqual(decide(issue)["why"], why)
+
+    def test_an_unlock_carries_the_replan_that_hit_the_budget(self):
+        used = [planned(1, "2026-11-22T08:00:00Z"), planned(2, "2026-11-22T08:30:00Z"), planned(3, "2026-11-22T09:00:00Z")]
+        replan = note("lane[bot]", "/sheriff replan again", "2026-11-22T10:00:00Z", bot=True)
+        noted = note(APP, "limit\n\n<!-- sheriff-plan-budget -->", "2026-11-22T10:01:00Z", bot=True)
+        result = decide(task(used + [replan, noted, note("boss", "/sheriff plan", "2026-11-22T10:05:00Z")]))
+        self.assertEqual((result["version"], result["reason"], result["requester"]), (4, "again", "lane[bot]"))
+
+    def test_a_long_reason_is_cut(self):
+        result = decide(task([planned(1), note("boss", "/sheriff replan " + "x" * 5000, "2026-11-22T11:00:00Z")]))
+        self.assertEqual(len(result["reason"]), plan.REASON_LIMIT)
+
+
+class ReserveTests(unittest.TestCase):
+    def reserve(self, issue, login=APP + "[bot]"):
+        outs, posts = [], []
+
+        def fake(args):
+            if "/permission" in args[-1]:
+                return {"role_name": ROLES.get(args[-1].split("/")[-2], "write")}
+            if args[:3] == ["api", "-X", "POST"]:
+                posts.append({"path": args[3], "body": args[args.index("-f") + 1][5:]})
+                return {"id": 55}
+            raise AssertionError(args)
+        with mock.patch.object(plan, "read_issue", return_value=issue), mock.patch.object(plan, "gh_json", side_effect=fake), \
+             mock.patch.object(plan, "output", side_effect=lambda **values: outs.append(values)), mock.patch("sys.stderr"), \
+             mock.patch.dict(os.environ, {"GH_REPO": "o/r", "GH_ACTOR_LOGIN": login, "GITHUB_SERVER_URL": "https://h", "GITHUB_REPOSITORY": "o/r", "GITHUB_RUN_ID": "9"}):
+            code = plan.main(["reserve", "--issue", "12", "--rounds", "3", "--ack-authors", "", "--unlock-authors", ""])
+        return code, outs, posts
+
+    def test_a_plan_is_reserved_with_a_start_comment_before_any_model_runs(self):
+        code, outs, posts = self.reserve(task())
+        self.assertEqual((code, len(posts)), (0, 1))
+        self.assertEqual(posts[0]["path"], "repos/{owner}/{repo}/issues/12/comments")
+        self.assertEqual(posts[0]["body"].splitlines()[0], "<!-- sheriff-plan-start v=1 -->")
+        self.assertIn("Sheriff is writing plan v1 for this issue", posts[0]["body"])
+        self.assertIn("https://h/o/r/actions/runs/9", posts[0]["body"])
+        self.assertEqual({k: outs[-1][k] for k in ("skip", "version", "comment_id", "app")}, {"skip": "", "version": 1, "comment_id": "55", "app": APP})
+        self.assertEqual(json.loads(outs[-1]["request"]), {"version": 1, "reason": "", "requester": ""})
+
+    def test_a_used_budget_posts_one_note_and_reserves_nothing(self):
+        code, outs, posts = self.reserve(task([planned(1), planned(2), planned(3), note("lane[bot]", "/sheriff replan x", "2026-11-22T11:00:00Z", bot=True)]))
+        self.assertEqual(len(posts), 1)
+        self.assertEqual(posts[0]["body"].splitlines()[-1], "<!-- sheriff-plan-budget -->")
+        self.assertIn("written 3 plans", posts[0]["body"])
+        self.assertEqual((outs[-1]["skip"], outs[-1].get("comment_id", "")), ("plan budget used", ""))
+
+    def test_two_failures_post_the_failure_budget_note(self):
+        failed = lambda at: note(APP + "[bot]", "<!-- sheriff-plan-failed v=1 -->\nx", at, True)
+        code, outs, posts = self.reserve(task([failed("2026-11-22T10:00:00Z"), failed("2026-11-22T10:30:00Z"), note("boss", "/sheriff plan", "2026-11-22T11:00:00Z")]))
+        self.assertIn("failed to write a plan 2 times in a row", posts[0]["body"])
+        self.assertEqual(posts[0]["body"].splitlines()[-1], "<!-- sheriff-plan-budget -->")
+        self.assertEqual(outs[-1]["skip"], "plan budget used")
+
+    def test_a_skip_posts_nothing_and_without_the_apps_login_nothing_runs(self):
+        self.assertEqual(self.reserve(task([planned(1)]))[2], [])
+        self.assertEqual(self.reserve(task(), login="")[0], 1)
+
+
+class CommentTextTests(unittest.TestCase):
+    BODY = "<!-- sheriff-plan v=2 base=" + BASE + " -->\n**Sheriff plan v2**\n## Problem\nx\n<!-- sheriff-usage {\"provider\": \"claude\", \"model\": \"m\", \"usage\": {\"input\": 1}} -->"
+
+    def test_superseding_rewrites_only_the_header(self):
+        old = plan.supersede(self.BODY, 3)
+        self.assertEqual(old.splitlines()[:2], ["<!-- sheriff-plan v=2 base=" + BASE + " superseded-by=3 -->", "**Superseded by v3.**"])
+        self.assertEqual(old.splitlines()[2:], self.BODY.splitlines()[1:])
+        self.assertIsNone(plan.current_plan([note(APP + "[bot]", old, bot=True)], APP))
+
+    def test_a_failure_note_is_a_marker_line_and_an_escaped_cut_reason(self):
+        body = plan.failure_note(2, "bad <!-- sheriff-plan v=9 --> " + "x" * 400)
+        self.assertEqual(body.splitlines()[0], "<!-- sheriff-plan-failed v=2 -->")
+        self.assertIn("Sheriff could not write plan v2: bad &lt;!-- sheriff-plan v=9 -->", body)
+        self.assertIn("Comment `/sheriff plan` (or `/sheriff replan <reason>`) to try again.", body)
+        self.assertEqual(body.count("<!--"), 1)
+        self.assertEqual(plan.plans([note(APP + "[bot]", body, bot=True)], APP), [])
+
+    def test_usage_is_read_from_the_last_line(self):
+        self.assertEqual(plan.usage_of(self.BODY), {"provider": "claude", "model": "m", "usage": {"input": 1}})
+        self.assertIsNone(plan.usage_of("x\n<!-- sheriff-usage not json -->"))
+        self.assertIsNone(plan.usage_of("<!-- sheriff-usage {} -->\nmore"))
+        self.assertIsNone(plan.usage_of(""))
 
 
 if __name__ == "__main__":
