@@ -16,6 +16,27 @@ CHEAP, SMART = ("opencode", "opencode-go/deepseek-v4.1-flash"), ("claude", "clau
 USAGE = {"input": 10, "cache_read": 0, "cache_write": 0, "output": 5, "reasoning": 0, "cost_usd": 0.0}
 
 
+BASE_PLAN = "<!-- sheriff-plan v={v} base=" + BASE + "{tail} -->\n**Sheriff plan v{v}**\n## Problem\nx"
+
+
+def issue_with_plan(version):
+    nodes = []
+    for v in range(1, version + 1):
+        tail = " superseded-by=" + str(v + 1) if v < version else ""
+        nodes.append({"databaseId": 100 + v, "body": BASE_PLAN.format(v=v, tail=tail), "createdAt": "2026-11-22T10:00:00Z",
+                      "lastEditedAt": None, "author": {"login": "gate", "__typename": "Bot"}, "editor": None})
+    return {"data": {"repository": {"issue": {"number": 12, "title": "LOGIN-FIX: fix login", "body": "b", "state": "OPEN",
+            "author": {"login": "boss", "__typename": "User"}, "issueType": None, "labels": {"nodes": []},
+            "comments": {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": nodes}}}}}
+
+
+def closing_view():
+    return {"title": "x (LOGIN-FIX)", "closingIssuesReferences": [{"number": 12, "repository": {"name": "r", "owner": {"login": "o"}}}]}
+
+
+WITH_PLAN = dict(view=closing_view(), issue=issue_with_plan(1))
+
+
 def runner(answers):
     calls = []
 
@@ -195,7 +216,7 @@ def recorder():
 
 
 class ReserveTests(unittest.TestCase):
-    def reserve(self, view=None, checks=(), reviews=(), comments=(), login="gate[bot]", extra=()):
+    def reserve(self, view=None, checks=(), reviews=(), comments=(), login="gate[bot]", extra=(), issue=None):
         view = dict({"state": "OPEN", "isDraft": False, "baseRefName": "main", "headRefOid": HEAD}, **(view or {}))
         gh, outs = [], []
         run, writes = recorder()
@@ -204,9 +225,13 @@ class ReserveTests(unittest.TestCase):
             gh.append(args)
             if args[:2] == ["pr", "view"]:
                 return view
+            if args[:2] == ["api", "graphql"] and "issue(number:" in " ".join(args):
+                return issue
             if args[:2] == ["api", "graphql"]:
                 return {"data": {"repository": {"pullRequest": {"author": {"login": "author"},
                         "reviews": {"pageInfo": {"hasNextPage": False}, "nodes": list(reviews)}}}}}
+            if args[-1].endswith("per_page=100") and "/issues?" in args[-1]:
+                return [[]]
             if "/compare/main..." + HEAD in args[1]:
                 return {"merge_base_commit": {"sha": BASE}}
             if "/check-runs" in args[1]:
@@ -277,7 +302,8 @@ class ReserveTests(unittest.TestCase):
         self.assertTrue(body.startswith("body=Sheriff review in progress at head `" + HEAD[:12] + "`\n"))
         self.assertNotIn("cheap first pass", body)
         self.assertEqual(outs[-1], {"skip": "", "head": HEAD, "base": BASE, "review_id": "55",
-                                    "counts": '{"first":1,"final":0,"unlocks":0,"edited":false}'})
+                                    "counts": '{"first":1,"final":0,"unlocks":0,"edited":false}',
+                                    "plan_issue": 0, "plan_version": 0, "app": "gate"})
 
     def test_the_reservation_links_the_workflow_run_when_the_environment_names_it(self):
         env = {"GITHUB_SERVER_URL": "https://github.com", "GITHUB_REPOSITORY": "o/r", "GITHUB_RUN_ID": "99"}
@@ -303,17 +329,74 @@ class ReserveTests(unittest.TestCase):
         code, outs, gh, writes = self.reserve(view={"headRefOid": "zz"})
         self.assertEqual((code, self.reservations(gh), writes), (1, [], []))
 
+    def test_a_new_plan_version_allows_one_review_of_an_unchanged_head(self):
+        with_plan = dict(WITH_PLAN, extra=("--plan", "on"))
+        bare = {"app": {"slug": "gate"}, "status": "completed", "external_id": BASE}
+        code, outs, gh, writes = self.reserve(checks=[bare], **with_plan)
+        self.assertEqual((outs[-1]["skip"], outs[-1]["plan_issue"], outs[-1]["plan_version"]), ("", 12, 1))
+        keyed = dict(bare, external_id=BASE + "/plan-1")
+        self.assertEqual(self.reserve(checks=[keyed], **with_plan)[1][-1]["skip"], "already reviewed at this head and base")
+
+    def test_without_planning_no_issue_is_read(self):
+        code, outs, gh, writes = self.reserve(reviews=[gate(marker("first"))])
+        self.assertFalse(any("issue(number:" in " ".join(args) for args in gh))
+        self.assertFalse(any("closingIssuesReferences" in " ".join(args) for args in gh))
+        self.assertEqual((outs[-1]["plan_issue"], outs[-1]["plan_version"], outs[-1]["app"]), (0, 0, "gate"))
+
+    def test_plan_off_is_the_same_as_no_plan(self):
+        for value in ("off", ""):
+            with self.subTest(value=value):
+                code, outs, gh, writes = self.reserve(extra=("--plan", value))
+                self.assertEqual(code, 0)
+                self.assertFalse(any("issue(number:" in " ".join(args) for args in gh))
+                self.assertEqual((outs[-1]["plan_issue"], outs[-1]["plan_version"]), (0, 0))
+
+    def test_a_budget_verdict_is_keyed_to_the_plan_version(self):
+        used = [gate(marker("first")) for _ in range(3)] + [gate(marker("final")) for _ in range(3)]
+        code, outs, gh, writes = self.reserve(reviews=used, extra=("--plan", "on"), **WITH_PLAN)
+        self.assertEqual((outs[-1]["skip"], writes[-1][-1]["external_id"]), ("decided", BASE + "/plan-1"))
+        done = {"app": {"slug": "gate"}, "status": "completed", "external_id": BASE + "/plan-1"}
+        self.assertEqual(self.reserve(reviews=used, checks=[done], extra=("--plan", "on"), **WITH_PLAN)[1][-1]["skip"], "already reviewed at this head and base")
+
+    def test_an_unreadable_plan_skips_the_review_with_the_reason(self):
+        with mock.patch.object(review.planner, "read_issue", side_effect=review.planner.PlanError("bad")):
+            code, outs, gh, writes = self.reserve(extra=("--plan", "on"), **WITH_PLAN)
+        self.assertEqual((code, outs[-1]["skip"]), (0, "could not read the plan on #12"))
+        with mock.patch.object(review.planner, "task_issue", side_effect=review.planner.PlanError("bad")):
+            code, outs, gh, writes = self.reserve(view={"title": "x (LOGIN-FIX)", "closingIssuesReferences": []}, extra=("--plan", "on"), issue=issue_with_plan(1))
+        self.assertEqual(outs[-1]["skip"], "could not read the plan on #7")
+
+    def test_a_pull_request_without_a_task_issue_has_no_plan(self):
+        code, outs, gh, writes = self.reserve(view={"title": "plain", "closingIssuesReferences": []}, extra=("--plan", "on"))
+        self.assertEqual((outs[-1]["skip"], outs[-1]["plan_issue"], outs[-1]["plan_version"]), ("", 0, 0))
+
 
 class PrepareTests(unittest.TestCase):
-    def prepare(self, actual, merge_base):
+    def prepare(self, actual, merge_base, plan_issue=0, plan_version=0, issue=None):
         out = pathlib.Path(tempfile.mkdtemp()) / "review"
         answers = {"rev-parse": actual + "\n", "merge-base": merge_base + "\n", "diff": "diff --git a/x b/x\n"}
         outs = []
+        view = {"title": "t", "body": "b", "url": "u"}
         with mock.patch.object(review, "run", side_effect=lambda args, cwd=None: answers[args[1]]), \
-             mock.patch.object(review, "gh_json", return_value={"title": "t", "body": "b", "url": "u"}) as gh, \
+             mock.patch.object(review, "gh_json", side_effect=lambda args: issue if args[:2] == ["api", "graphql"] else view) as gh, \
+             mock.patch.dict(os.environ, {"GH_REPO": "o/r"}), \
              mock.patch.object(review, "output", side_effect=lambda **values: outs.append(values)):
-            review.prepare(7, "pr", out, "main", HEAD, BASE)
+            review.prepare(7, "pr", out, "main", HEAD, BASE, plan_issue, plan_version, "gate")
         return outs[-1], out, gh
+
+    def test_the_current_plan_is_given_to_the_reviewer(self):
+        result, out, gh = self.prepare(HEAD, BASE, plan_issue=12, plan_version=1, issue=issue_with_plan(1))
+        self.assertEqual(result["skip"], "")
+        self.assertTrue((out / "plan.md").read_text().startswith("<!-- sheriff-plan v=1 "))
+
+    def test_a_plan_that_moved_since_the_reservation_is_not_reviewed(self):
+        result, out, gh = self.prepare(HEAD, BASE, plan_issue=12, plan_version=1, issue=issue_with_plan(2))
+        self.assertEqual(result["skip"], "plan moved")
+        self.assertFalse((out / "plan.md").exists())
+
+    def test_without_a_plan_no_plan_file_is_written(self):
+        result, out, gh = self.prepare(HEAD, BASE)
+        self.assertFalse((out / "plan.md").exists())
 
     def test_a_head_or_merge_base_other_than_the_reserved_one_is_not_reviewed(self):
         for actual, merge_base in (("b" * 40, BASE), (HEAD, "d" * 40)):
@@ -390,6 +473,21 @@ class PostTests(unittest.TestCase):
         self.assertEqual([args[3:5] for args in calls], [["PUT", "repos/{owner}/{repo}/pulls/7/reviews/55"]])
         self.assertTrue(pathlib.Path(path).with_suffix(".md").read_text().startswith("This review is of an earlier head"))
 
+    def test_the_verdict_is_keyed_to_the_plan_version(self):
+        path, calls = self.post({"headRefOid": HEAD, "state": "OPEN", "baseRefName": "main"}, record=self.record(plan=2))
+        self.assertEqual(json.loads(pathlib.Path(path).with_suffix(".check.json").read_text())["external_id"], BASE + "/plan-2")
+        done = [{"app": {"slug": "gate"}, "status": "completed", "external_id": BASE + "/plan-2"}]
+        _, calls = self.post({"headRefOid": HEAD, "state": "OPEN", "baseRefName": "main"}, record=self.record(plan=2), checks=done)
+        self.assertEqual(len(calls), 1)
+
+    def test_a_malformed_plan_version_is_refused(self):
+        for plan_version in ("2", -1, None, True):
+            with self.subTest(plan=plan_version), mock.patch.dict(os.environ, {"GH_ACTOR_LOGIN": "gate[bot]"}), \
+                 mock.patch.object(review, "gh_json", side_effect=AssertionError("gh reached")), \
+                 mock.patch.object(review, "run", side_effect=AssertionError("gh reached")), \
+                 self.assertRaisesRegex(review.ReviewError, "plan"):
+                review.post(self.write(self.record(plan=plan_version)), "main")
+
     def test_a_malformed_review_id_is_refused(self):
         for review_id in ("55/../1", "x", "1 2"):
             with self.subTest(review_id=review_id), self.assertRaises(review.ReviewError):
@@ -425,6 +523,22 @@ class PostTests(unittest.TestCase):
         for changes in ({"head": "zz"}, {"verdict": "maybe"}, {"model": "m -->"}, {"stage": "other"}, {"base": ""}):
             with self.subTest(changes=changes), self.assertRaises(review.ReviewError):
                 review.post(self.write(self.record(**changes)), "main")
+
+
+class EditedPlanTests(unittest.TestCase):
+    def test_the_record_carries_the_plan_version(self):
+        run, calls = runner({CHEAP: "x\nVERDICT: BLOCKED"})
+        record = review.review_run(7, HEAD, BASE, ".", "p", CHEAP, SMART, 3, 3, counts(), False, runner=run, plan_version=3)
+        self.assertEqual(record["plan"], 3)
+        self.assertEqual(review.review_run(7, HEAD, BASE, ".", "p", CHEAP, SMART, 3, 3, counts(), False, runner=run)["plan"], 0)
+
+
+class PromptTests(unittest.TestCase):
+    def test_the_review_prompt_checks_the_plan_and_the_minimal_change(self):
+        text = (ROOT / "prompts/review.md").read_text()
+        self.assertIn("review/plan.md", text)
+        self.assertIn("Check the change against the plan. A different approach, files outside the plan's scope or missing planned tests without a replan is BLOCKING.", text)
+        self.assertIn("so is code made hard to read to save lines", text)
 
 
 if __name__ == "__main__":
