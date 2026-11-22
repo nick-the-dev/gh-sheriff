@@ -2,7 +2,8 @@ name: Sheriff Relay
 
 # Installed by gh sheriff. Pull request and review events run a pull request's own copy of a workflow, so this one
 # holds no permissions and does nothing; Sheriff runs from the default branch when it completes (workflow_run). It
-# always runs on a fresh GitHub-hosted machine, so a pull request cannot use it to plant files on a shared runner.
+# runs on SHERIFF_RELAY_RUNS_ON (default: a GitHub-hosted machine) and holds no secrets; Sheriff's secrets are only
+# reachable from the default branch.
 on:
   pull_request:
     types: [opened, reopened, synchronize, ready_for_review, edited, closed, auto_merge_enabled, auto_merge_disabled]
