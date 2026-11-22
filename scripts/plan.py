@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 """Sheriff plan: the facts the planner shares, namely the comment markers, an issue read with its comments, the
 App's current plan on a task issue, the task issue of a pull request, the pull requests linked to an issue and the
-review keys that bind a review to a plan version; and who may ask for a plan, the budget, and the reservation comment
-that the gate App posts before any model runs."""
+review keys that bind a review to a plan version; who may ask for a plan, the budget, and the reservation comment
+that the gate App posts before any model runs; and writing the plan: the issue prepared as data, the read-only model
+run, and the post that turns the reservation into the plan or a failure note and marks the old version superseded."""
 import argparse
 import datetime
+import importlib.util
 import json
 import os
+import pathlib
 import re
 import subprocess
 import sys
+import tempfile
 
 ID = r"[A-Z][A-Z0-9-]+"
 TASK_TITLE = re.compile(r"^(" + ID + r")(?: #\d+)?: ")
@@ -30,17 +34,29 @@ USAGE_MARKER = re.compile(r"<!--\s*sheriff-usage\s+(\{.*\})\s*-->")
 NO_PLAN_LABEL = "sheriff:no-plan"
 KEY_SEPARATOR = "/plan-"
 DEFAULT_MODEL = "claude:claude-opus-5-5"
+SECTIONS = ("Problem", "Solution space", "Chosen approach", "Tests", "Production check", "Out of scope")
+PLAN_LIMIT = 20_000
+TITLE_LIMIT = 300
+BODY_LIMIT = 20_000
+COMMENT_LIMIT = 4_000
+COMMENTS_SHOWN = 50
+SHA = re.compile(r"[0-9a-f]{40}")
+MODEL_NAME = re.compile(r"[A-Za-z0-9._:/-]{1,80}")
+REQUESTER = re.compile(r"(?:[A-Za-z0-9-]{1,39}(?:\[bot\])?)?")
 ISSUE_QUERY = """query($owner:String!,$name:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$name){issue(number:$number){
   number title body state author{login __typename} issueType{name} labels(first:20){nodes{name}}
   comments(first:100,after:$cursor){pageInfo{hasNextPage endCursor} nodes{databaseId body createdAt lastEditedAt author{login __typename} editor{login}}}}}}"""
+_SPEC = importlib.util.spec_from_file_location("sheriff_reviewers", pathlib.Path(__file__).with_name("reviewers.py"))
+reviewers = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(reviewers)
 
 
 class PlanError(Exception):
     pass
 
 
-def run(args):
-    result = subprocess.run(args, capture_output=True, text=True, check=False)
+def run(args, cwd=None):
+    result = subprocess.run(args, cwd=cwd, capture_output=True, text=True, check=False)
     if result.returncode:
         raise PlanError(" ".join(args[:3]) + " failed: " + (result.stderr or result.stdout).strip()[:300])
     return result.stdout
@@ -200,6 +216,21 @@ def usage_of(body):
     return data if isinstance(data, dict) else None
 
 
+def check_plan(text):
+    missing = [name for name in SECTIONS if not re.search(r"^#{1,3}\s*" + re.escape(name) + r"\s*$", text, re.I | re.M)]
+    if missing:
+        return "missing sections: " + ", ".join(missing)
+    return "longer than " + str(PLAN_LIMIT) + " characters" if len(text) > PLAN_LIMIT else ""
+
+
+def plan_comment(record):
+    version, requester = str(record["version"]), record.get("requester") or ""
+    usage = json.dumps({"provider": record["provider"], "model": record["model"], "usage": record["usage"]})
+    return ("<!-- sheriff-plan v=" + version + " base=" + record["base"] + " -->\n**Sheriff plan v" + version + "** (`" + record["model"]
+            + "`, default branch `" + record["base"][:12] + "`" + (", replan requested by @" + requester if requester else "") + ")\n\n"
+            + escape(record["text"]).strip() + "\n\n<!-- sheriff-usage " + usage + " -->")
+
+
 def trusted(login, bot, role, ack):
     return bool(bot or (login and (role(login) in MAINTAINER_ROLES or login.lower() in ack)))
 
@@ -338,6 +369,124 @@ def reserve(args):
     return output(skip="", version=version, comment_id=comment_id, request=request, app=slug)
 
 
+def write_json(path, value):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value, indent=2))
+
+
+def prepare(args):
+    out, request = pathlib.Path(args.out), json.loads(args.request)
+    version = int(request["version"])
+
+    def skip(why):
+        write_json(out / "plan.json", {"issue": args.issue, "version": version, "ok": False, "failure": why})
+        return output(skip=why, base="")
+    issue = read_issue(args.issue, gh_json)
+    if issue is None:
+        return skip("issue not found")
+    why = plannable(issue)
+    if why:
+        return skip(why)
+    newer = max((item["version"] for item in plans(issue["comments"], args.app)), default=0)
+    if newer >= version:
+        return skip("plan v" + str(newer) + " already exists")
+    base = run(["git", "rev-parse", "HEAD"], cwd=args.checkout).strip()
+    role, ack = make_role(), logins(args.ack_authors)
+    shown = [{"author": c["author"], "created": c["created"], "body": c["body"][:COMMENT_LIMIT]} for c in issue["comments"]
+             if not (c["bot"] and bare(c["author"]) == args.app) and trusted(c["author"], c["bot"], role, ack)][-COMMENTS_SHOWN:]
+    write_json(out / "issue.json", {"number": issue["number"], "title": issue["title"][:TITLE_LIMIT], "body": issue["body"][:BODY_LIMIT],
+                                    "author": issue["author"], "comments": shown})
+    write_json(out / "request.json", {"issue": args.issue, "version": version, "reason": str(request.get("reason") or ""),
+                                      "requester": str(request.get("requester") or ""), "base": base})
+    current = current_plan(issue["comments"], args.app)
+    if current:
+        (out / "previous.md").write_text(current["body"])
+    return output(skip="", base=base)
+
+
+def run_plan(args):
+    request = json.loads(args.request)
+    record = {"issue": args.issue, "version": int(request["version"]), "ok": False}
+    try:
+        spec = reviewers.parse_spec(args.model or DEFAULT_MODEL)
+        web = reviewers.web_tools(args.web, args.fetch_domains)
+        result = reviewers.run(spec, pathlib.Path(args.prompt).read_text(), args.workdir, turns=args.turns, web=web if spec[0] == "claude" else ())
+    except reviewers.ReviewerError as exc:
+        record["failure"] = "the planner ended without a result: " + str(exc)
+    else:
+        text = result["text"].strip()
+        record["failure"] = check_plan(text)
+        if not record["failure"]:
+            record = {"issue": args.issue, "version": record["version"], "base": args.base, "provider": result["provider"], "model": result["model"],
+                      "ok": True, "text": text, "usage": result["usage"], "requester": str(request.get("requester") or "")}
+    write_json(pathlib.Path(args.out), record)
+    return output(ok=str(record["ok"]).lower(), issue=args.issue, version=record["version"])
+
+
+def record_problem(record, issue, version):
+    if not (isinstance(record, dict) and record.get("issue") == issue and record.get("version") == version and type(record.get("version")) is int
+            and isinstance(record.get("ok"), bool)):
+        return "the planning run produced a malformed result"
+    if not record["ok"]:
+        return ""
+    if not (SHA.fullmatch(str(record.get("base"))) and MODEL_NAME.fullmatch(str(record.get("model"))) and record.get("provider") in reviewers.SECRETS
+            and REQUESTER.fullmatch(str(record.get("requester") or "")) and isinstance(record.get("usage"), dict) and isinstance(record.get("text"), str)):
+        return "the planning run produced a malformed result"
+    return check_plan(record["text"])
+
+
+def patch_comment(comment_id, body):
+    with tempfile.TemporaryDirectory() as folder:
+        path = pathlib.Path(folder) / "body.md"
+        path.write_text(body)
+        run(["gh", "api", "-X", "PATCH", "repos/{owner}/{repo}/issues/comments/" + str(comment_id), "-F", "body=@" + str(path)])
+
+
+def post(args):
+    login = os.environ.get("GH_ACTOR_LOGIN", "").strip()
+    if not login:
+        raise PlanError("GH_ACTOR_LOGIN is not set: run plan.py post through app-token.py as the gate App")
+    slug = bare(login)
+    issue = read_issue(args.issue, gh_json)
+    held = next((c for c in (issue or {}).get("comments", []) if str(c["id"]) == str(args.comment_id)), None)
+    marker = START_MARKER.match(first_line(held["body"])) if held else None
+    if not (held and held["bot"] and bare(held["author"]) == slug and marker and marker.group(1) == str(args.version)
+            and not (held["edited"] and bare(held["editor"]) != slug)):
+        raise PlanError("comment " + str(args.comment_id) + " is not this run's open reservation; nothing is posted")
+    refused = ""
+    try:
+        record = json.loads(pathlib.Path(args.record).read_text())
+    except (OSError, ValueError):
+        record, why = None, "the planning run ended without a result"
+    else:
+        refused = record_problem(record, args.issue, args.version)
+        why = refused or ("" if record["ok"] else str(record.get("failure") or "the planner gave no reason"))
+    newer = max((item["version"] for item in plans(issue["comments"], slug)), default=0)
+    if not why and newer >= args.version:
+        why = "overtaken by plan v" + str(newer)
+    if why:
+        patch_comment(args.comment_id, failure_note(args.version, why))
+        output(posted="false", prs="")
+        if refused:
+            raise PlanError("the record is refused: " + refused)
+        return
+    patch_comment(args.comment_id, plan_comment(record))
+    old = current_plan(issue["comments"], slug)
+    if old:
+        try:
+            patch_comment(old["id"], supersede(old["body"], args.version))
+        except PlanError as exc:
+            print(json.dumps({"ok": False, "warning": str(exc)}), file=sys.stderr, flush=True)
+    prs = ""
+    try:
+        rows = gh_json(["pr", "list", "--state", "open", "--limit", "200", "--json", "number,title,closingIssuesReferences"])
+        task = task_id(issue["title"])
+        prs = " ".join(str(n) for n in linked_prs(args.issue, task, rows, os.environ["GH_REPO"])) if task else ""
+    except (PlanError, KeyError, TypeError, AttributeError):
+        pass
+    return output(posted="true", prs=prs)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="plan.py")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -347,10 +496,33 @@ def main(argv=None):
     r.add_argument("--ack-authors", default="")
     r.add_argument("--unlock-authors", default="")
     r.add_argument("--event", default="")
+    q = sub.add_parser("prepare")
+    q.add_argument("--issue", type=int, required=True)
+    q.add_argument("--request", required=True)
+    q.add_argument("--app", required=True)
+    q.add_argument("--ack-authors", default="")
+    q.add_argument("--checkout", required=True)
+    q.add_argument("--out", required=True)
+    w = sub.add_parser("run")
+    w.add_argument("--issue", type=int, required=True)
+    w.add_argument("--request", required=True)
+    w.add_argument("--base", required=True)
+    w.add_argument("--workdir", required=True)
+    w.add_argument("--prompt", required=True)
+    w.add_argument("--model", default=DEFAULT_MODEL)
+    w.add_argument("--turns", type=int, default=40)
+    w.add_argument("--web", default="search")
+    w.add_argument("--fetch-domains", default="")
+    w.add_argument("--out", required=True)
+    s = sub.add_parser("post")
+    s.add_argument("--record", required=True)
+    s.add_argument("--issue", type=int, required=True)
+    s.add_argument("--version", type=int, required=True)
+    s.add_argument("--comment-id", required=True)
     args = parser.parse_args(argv)
     try:
-        reserve(args)
-    except PlanError as exc:
+        {"reserve": reserve, "prepare": prepare, "run": run_plan, "post": post}[args.command](args)
+    except (PlanError, reviewers.ReviewerError) as exc:
         print(json.dumps({"ok": False, "error": str(exc)}), file=sys.stderr, flush=True)
         return 1
     return 0
