@@ -552,6 +552,12 @@ class PromptTests(unittest.TestCase):
         self.assertIn("Only when `review/plan.md` is present: Check the change against the plan.", text)
         self.assertIn("A demonstrated departure from `review/plan.md` without a replan", text)
 
+    def test_the_minimal_change_point_is_advisory_unless_the_change_departs_from_the_plan(self):
+        text = (ROOT / "prompts/review.md").read_text()
+        point = " ".join(text[text.index("\n6. "):text.index("\n\n", text.index("\n6. "))].split())
+        self.assertIn("On its own this point is ADVISORY, never blocking; it blocks only where the change departs from `review/plan.md`, "
+                      "which point 5 makes BLOCKING.", point)
+
 
 if __name__ == "__main__":
     unittest.main()

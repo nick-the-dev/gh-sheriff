@@ -23,7 +23,8 @@ Review for correctness and security:
 4. Tests: does a test exercise the new behaviour, and would it fail without the change?
 5. Only when `review/plan.md` is present: Check the change against the plan. A different approach, files outside the plan's scope or missing planned tests without a replan is BLOCKING. A diff clearly larger than the plan needs (unplanned refactors, extra features, unrelated files) is a finding; so is code made hard to read to save lines.
 6. Minimal change, whether or not a plan exists: a change should be the smallest diff that solves its task and still reads
-   clearly. Unplanned refactors, speculative options and compressed code are findings.
+   clearly. Unplanned refactors, speculative options and compressed code are findings. On its own this point is
+   ADVISORY, never blocking; it blocks only where the change departs from `review/plan.md`, which point 5 makes BLOCKING.
 
 A finding blocks only if it is a real defect you can demonstrate: name the file and line, the input or situation,
 and the wrong outcome. A demonstrated departure from `review/plan.md` without a replan (point 5) also blocks; name the file and the plan
