@@ -47,6 +47,22 @@ class ExistingChecksTests(unittest.TestCase):
 
 
 class StatsTests(unittest.TestCase):
+    def test_plan_runs_are_listed_but_do_not_change_the_review_share(self):
+        u = {"input": 100, "cache_read": 0, "cache_write": 0, "output": 10, "cost_usd": 1.0}
+        reviews = [{"pr": 1, "stage": "first", "model": "cheap", "usage": u}, {"pr": 1, "stage": "final", "model": "opus", "usage": u}]
+        by_model, total, share = cli.summarise(reviews + [{"pr": None, "stage": "plan", "model": "opus", "usage": u}])
+        self.assertEqual(by_model[("plan", "opus")]["reviews"], 1)
+        self.assertEqual((total, share), cli.summarise(reviews)[1:])
+
+    def test_plan_rows_count_only_the_apps_plans_with_usage(self):
+        usage = '<!-- sheriff-usage {"provider": "claude", "model": "claude-opus-5-5", "usage": {"input": 5}} -->'
+        head = "<!-- sheriff-plan v=1 base=" + "c" * 40 + " -->"
+        page = [{"user": {"login": "o-sheriff[bot]"}, "body": head + "\nplan\n" + usage},
+                {"user": {"login": "writer"}, "body": head + "\npasted\n" + usage},
+                {"user": {"login": "o-sheriff[bot]"}, "body": "<!-- sheriff-plan-start v=2 -->\nwriting"}]
+        with mock.patch.object(cli, "gh_json", side_effect=[page, []]):
+            self.assertEqual(cli.plan_rows("o/r", "o-sheriff", 50), [{"pr": None, "stage": "plan", "model": "claude-opus-5-5", "usage": {"input": 5}}])
+
     def test_the_smart_share_counts_only_final_reviews(self):
         u = lambda i, r, o: {"input": i, "cache_read": r, "cache_write": 0, "output": o, "cost_usd": 0.0}
         rows = [{"pr": 1, "stage": "first", "model": "cheap", "usage": u(900, 5000, 100)},
@@ -88,6 +104,7 @@ class AppConfigTests(unittest.TestCase):
         self.assertEqual(manifest["default_permissions"]["checks"], "write")
         self.assertNotIn("administration", manifest["default_permissions"])
         self.assertEqual(manifest["default_permissions"]["contents"], "read")
+        self.assertEqual(manifest["default_permissions"]["issues"], "write")
 
 
 class TaskWiringTests(unittest.TestCase):
@@ -485,6 +502,58 @@ class StatusMirrorTests(unittest.TestCase):
     def test_a_refused_option_update_prints_a_note_and_skips_the_backfill(self):
         calls, out = self.run_options(["Todo", "Done"], fail=True)
         self.assertEqual(([call[0] for call in calls], "add them in the board's Status field settings" in out), ([cli.UPDATE_STATUS_OPTIONS], True))
+
+
+class PlanningInstallTests(unittest.TestCase):
+    def run_planning(self, variables, choice=None, new=False):
+        written = {}
+        with mock.patch.object(cli, "repo_variable", side_effect=lambda repo, name: variables.get(name, "")), \
+             mock.patch.object(cli, "set_variable", side_effect=lambda repo, name, value: written.__setitem__(name, value)), \
+             mock.patch.object(cli, "plan_permission_problem", return_value=None), mock.patch("sys.stdout", io.StringIO()):
+            return cli.ensure_planning(ORG, choice, new), written
+
+    def test_a_new_install_turns_planning_on_with_its_start_time(self):
+        secrets, written = self.run_planning({}, new=True)
+        self.assertEqual(written["SHERIFF_PLAN"], "on")
+        self.assertRegex(written["SHERIFF_PLAN_SINCE"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+        self.assertEqual(secrets, {"CLAUDE_CODE_OAUTH_TOKEN"})
+
+    def test_an_existing_install_keeps_planning_as_it_is(self):
+        self.assertEqual(self.run_planning({}), (set(), {}))
+        self.assertEqual(self.run_planning({"SHERIFF_PLAN": "off"}, new=True)[1], {})
+
+    def test_on_and_off_are_explicit_and_keep_an_earlier_start_only_while_planning_stayed_on(self):
+        self.assertEqual(self.run_planning({"SHERIFF_PLAN": "on", "SHERIFF_PLAN_SINCE": "2026-01-01T00:00:00Z"}, "on")[1], {"SHERIFF_PLAN": "on"})
+        restarted = self.run_planning({"SHERIFF_PLAN": "off", "SHERIFF_PLAN_SINCE": "2026-01-01T00:00:00Z"}, "on")[1]
+        self.assertNotEqual(restarted["SHERIFF_PLAN_SINCE"], "2026-01-01T00:00:00Z")
+        self.assertEqual(self.run_planning({"SHERIFF_PLAN": "on"}, "off"), (set(), {"SHERIFF_PLAN": "off"}))
+        self.assertEqual(self.run_planning({"SHERIFF_PLAN_MODEL": "opencode:opencode-go/x"}, "on")[0], {"OPENCODE_API_KEY"})
+
+    def test_a_missing_start_is_filled_while_planning_is_on(self):
+        secrets, written = self.run_planning({"SHERIFF_PLAN": "on"})
+        self.assertEqual(set(written), {"SHERIFF_PLAN_SINCE"})
+        self.assertEqual(secrets, {"CLAUDE_CODE_OAUTH_TOKEN"})
+
+    def test_install_takes_the_plan_option(self):
+        with mock.patch.object(cli, "install", side_effect=lambda args: self.assertEqual(args.plan, "on")):
+            cli.main(["install", "--plan", "on"])
+
+
+class PlanDoctorTests(unittest.TestCase):
+    def test_plan_problems_name_the_start_the_web_mode_and_the_issues_permission(self):
+        variables = {"SHERIFF_PLAN": "on", "SHERIFF_PLAN_WEB": "allowlist"}
+        with mock.patch.object(cli, "repo_variable", side_effect=lambda repo, name: variables.get(name, "")), \
+             mock.patch.object(cli, "gh_json", return_value={"permissions": {"issues": "read"}}):
+            problems = cli.plan_problems(ORG, "o-sheriff")
+        self.assertTrue(any("SHERIFF_PLAN_SINCE" in p for p in problems))
+        self.assertTrue(any("allowlist" in p or "domain" in p for p in problems))
+        self.assertTrue(any("https://github.com/organizations/o/settings/apps/o-sheriff/permissions" in p for p in problems))
+
+    def test_a_complete_planning_setup_has_no_problems(self):
+        variables = {"SHERIFF_PLAN": "on", "SHERIFF_PLAN_SINCE": "2026-11-22T00:00:00Z", "SHERIFF_PLAN_WEB": "any"}
+        with mock.patch.object(cli, "repo_variable", side_effect=lambda repo, name: variables.get(name, "")), \
+             mock.patch.object(cli, "gh_json", return_value={"permissions": {"issues": "write"}}):
+            self.assertEqual(cli.plan_problems(ORG, "o-sheriff"), [])
 
 
 if __name__ == "__main__":

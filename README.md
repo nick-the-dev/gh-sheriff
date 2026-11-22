@@ -17,6 +17,7 @@
 
 Sheriff is for repositories where AI agents open pull requests. One command sets up:
 
+- a plan from Claude Opus on each task issue, before the work starts (see [Planning](#planning));
 - an AI review on every push. A cheap model goes first, and Claude Opus reviews only if that passes;
 - a ruleset that blocks merging until the review passes. Admins can't bypass it either;
 - task tracking with GitHub Issues and a GitHub Projects board. Each task's status follows its pull request and your
@@ -49,11 +50,14 @@ flowchart TB
     REVIEW -->|clean| SHIP
 ```
 
+0. If planning is on, Sheriff posts a plan on the task issue first (see [Planning](#planning)). `Merge gate` waits for
+   that plan, and the review checks the pull request against it.
 1. An agent pushes to a pull request.
 2. A cheap model reviews the diff. If it finds a problem, the `Review` check fails and the agent pushes a fix. Changes
    that only touch docs stop here.
 3. If the cheap review is clean, Claude Opus reviews the same diff.
-4. The `Merge gate` check passes when two things hold:
+4. The `Merge gate` check passes when these hold:
+   - the task issue has a current Sheriff plan, if planning is on;
    - every comment from a person has an agent reply;
    - production is healthy, if you configured a health check.
 
@@ -91,6 +95,7 @@ It does the following:
 2. Creates a GitHub App for your account (one click in the browser). Only this App can post the `Review` and
    `Merge gate` results.
 3. Asks which reviewers to use and stores their keys.
+   A new install also turns planning on (`--plan off` skips it) and sets `SHERIFF_PLAN_SINCE`.
 4. Opens a pull request that adds `.github/workflows/sheriff.yml` and `sheriff-relay.yml`. Sheriff reviews that pull
    request, and it merges itself. It also lists your repository's workflows that run on pull requests in
    `sheriff.yml`, so the merge gate re-runs as soon as one of them finishes; those runs never start a review. Run
@@ -99,6 +104,62 @@ It does the following:
    you already have are kept.
 6. Adds three issue fields to your account and creates a GitHub Projects board named `<repo> work`. Skip this with
    `--no-work-state`.
+
+## Planning
+
+With `SHERIFF_PLAN=on`, Claude Opus writes a plan on each task issue before the work starts. The plan is a comment
+posted by Sheriff's App, with six sections:
+
+- **Problem**: what is wrong or missing, and why it matters.
+- **Solution space**: the options, with web research where it changes the answer, and why the others were rejected.
+- **Chosen approach**: the design, the files to change, edge cases and risks. It is the minimal readable change: the
+  smallest diff that solves the problem, still clear for a person to read. No clever compression, no drive-by
+  refactors, no speculative options.
+- **Tests**: the tests that prove the change, failing before and passing after.
+- **Production check**: how to verify it after release.
+- **Out of scope**: what the task must not touch.
+
+The plan binds the pull request. `Merge gate` stays pending ("needs a Sheriff plan on #N") until the task issue has a
+current plan, and the review gets the plan and checks the pull request against it. A different approach, files outside
+the plan or missing planned tests, without a replan, is a blocking finding. Only a plan comment by Sheriff's App counts,
+so nobody can paste one in. A pull request's task issue is the one it closes, or else the open issue whose title starts
+with the ID in the pull request title (`(LOGIN-FIX)`). Pull requests with neither are not gated.
+
+**Who triggers planning.** An issue opened by a bot, an admin, a maintainer or a login in `SHERIFF_ACK_AUTHORS` is planned
+at once. For anyone else's issue, one of those people comments `/sheriff plan`. An issue that already has a plan is not
+planned again, and open issues are not planned in bulk. Only comments from those trusted authors reach the planner.
+
+**Changing a plan.** Comment `/sheriff replan <reason>` on the issue. The planner treats the reason as a claim to check
+against the code, not as an instruction, and writes the next version. The gate and the review use the latest version,
+and a new version allows one more review of an unchanged pull request head.
+
+**Budget and unlocks.** An issue gets at most `SHERIFF_PLAN_ROUNDS` plans (default 3). After that Sheriff posts a budget
+notice, and an admin, a maintainer or a login in `SHERIFF_UNLOCK_AUTHORS` comments `/sheriff plan` to allow one more.
+The person who asked for the replan can't unlock it.
+
+**The 2-failure rule.** If the planner fails twice in a row (a crash, a timeout or a plan that doesn't pass the format
+check), Sheriff stops and posts the budget notice. A maintainer's `/sheriff plan` allows another try.
+
+**Web access.** `SHERIFF_PLAN_WEB` sets what the planner can reach on the web:
+
+| Value | Planner can | Risk |
+|---|---|---|
+| `search` (default) | Search the web | Low: it never fetches a URL |
+| `allowlist` | Search, and fetch pages on the domains in `SHERIFF_PLAN_FETCH_DOMAINS` | Text in an issue can make it fetch from those domains only |
+| `any` | Search, and fetch any URL | Text in an issue could make it send what it has read to an outside URL |
+
+Use `any` only if you trust everyone who can open issues in the repository. The planner runs read-only, with no shell, but
+a fetch is an outbound request.
+
+**Exemptions.** Pull requests opened before `SHERIFF_PLAN_SINCE` are not gated. `install` sets it when planning is
+switched on, and switching on again after off restarts it. An admin can label a pull request `sheriff:no-plan` for an
+emergency, and the gate says so in its description.
+
+**App permission.** Posting plans needs the App's repository permission Issues: Read and write. Apps created by an
+earlier Sheriff only have read. To grant it, open the App's settings, then Permissions, set Repository permissions >
+Issues to Read and write and save. Then accept the new permission request on the installation (an organization owner
+has to). `gh sheriff doctor` checks this, and `gh sheriff stats` lists plans next to reviews, outside the smart-model
+share.
 
 ## What your agents need
 
@@ -141,10 +202,10 @@ cost; aim for under 10%.
 
 | Command | Description |
 |---|---|
-| `gh sheriff install` | Set up a repository. Flags: `--repo`, `--first-pass`, `--review-model`, `--no-work-state`, `--project-name`, `--no-files`, `--yes` |
+| `gh sheriff install` | Set up a repository. Flags: `--repo`, `--first-pass`, `--review-model`, `--plan on|off`, `--no-work-state`, `--project-name`, `--no-files`, `--yes` |
 | `gh sheriff doctor` | Check the setup and print what to fix |
 | `gh sheriff models` | Choose the cheap and the Opus reviewer |
-| `gh sheriff stats` | Show review usage and cost for recent pull requests |
+| `gh sheriff stats` | Show review and plan usage and cost for recent pull requests |
 | `gh sheriff task new "<title>"` | Create a task issue and add it to the board |
 | `gh sheriff task set <ID>` | Set fields Sheriff can't infer: `--stage Parked`, `--next "..."`, `--verify` |
 | `gh sheriff task verify <ID> --evidence-file F` | Record what was checked in production. Sets Verified and closes the issue |
@@ -161,12 +222,19 @@ All settings are repository variables. All are optional.
 | `SHERIFF_FIRST_PASS` | none | Cheap reviewer, e.g. `opencode:opencode-go/deepseek-v4.1-flash` |
 | `SHERIFF_REVIEW_MODEL` | `claude:claude-opus-5-5` | Final reviewer |
 | `SHERIFF_FIRST_PASS_ROUNDS`, `SHERIFF_REVIEW_ROUNDS` | `3`, `3` | Reviews allowed per pull request |
+| `SHERIFF_PLAN` | `on` for a new install, else off | `on` turns planning on. Anything else means off |
+| `SHERIFF_PLAN_SINCE` | set by `install` | Pull requests opened before this time (UTC, `2026-11-22T00:00:00Z`) need no plan |
+| `SHERIFF_PLAN_MODEL` | `claude:claude-opus-5-5` | Planner model |
+| `SHERIFF_PLAN_ROUNDS` | `3` | Plans allowed per issue |
+| `SHERIFF_PLAN_TURNS` | `40` | Turns the planner may take per plan |
+| `SHERIFF_PLAN_WEB` | `search` | `search`, `allowlist` or `any` (see [Planning](#planning)) |
+| `SHERIFF_PLAN_FETCH_DOMAINS` | none | Comma-separated domains the planner may fetch, with `allowlist` |
 | `SHERIFF_VERSION_URL` | none | A URL returning JSON with the deployed commit as `sha`. Used for `Merge gate` and Released |
 | `SHERIFF_HEALTH_URL` | none | `Merge gate` fails unless this URL returns 200 |
 | `SHERIFF_DEPLOY_WORKFLOW` | none | Deploy workflow file. `Merge gate` fails if its last run failed |
 | `SHERIFF_OVERRIDE` | none | A pull request number that may merge despite failing production checks |
-| `SHERIFF_ACK_AUTHORS` | none | Logins, other than bots, that count as agents when replying to comments |
-| `SHERIFF_UNLOCK_AUTHORS` | none | Logins, other than admins and maintainers, allowed to grant an extra review with `/sheriff review` |
+| `SHERIFF_ACK_AUTHORS` | none | Logins, other than bots, that count as agents when replying to comments, and as trusted authors for planning |
+| `SHERIFF_UNLOCK_AUTHORS` | none | Logins, other than admins and maintainers, allowed to grant an extra review with `/sheriff review` or an extra plan with `/sheriff plan` |
 | `SHERIFF_RUNS_ON` | `ubuntu-latest` | Runner label for the gate, reviews and work state (see [Runners and Actions minutes](#runners-and-actions-minutes)) |
 | `SHERIFF_RELAY_RUNS_ON` | `ubuntu-latest` | Runner label for the relay |
 
@@ -196,7 +264,12 @@ Team plan's monthly allowance. Use self-hosted runners unless the repository is 
 | `SHERIFF_RUNS_ON` | Gate, reviews, verdicts, work state | A runner label. These jobs hold the gate App key and the reviewer keys, so give them runners that never run pull request code: one job per runner, and no Docker socket shared with CI jobs |
 | `SHERIFF_RELAY_RUNS_ON` | The relay on pull request events | A runner label. The relay holds no secrets and runs the pull request's own copy of its workflow, so your normal CI runners are fine |
 
-Both default to `ubuntu-latest`. Sheriff's secrets stay in the `sheriff` and `sheriff-review` environments, which only
+Both default to `ubuntu-latest`.
+
+Self-hosted runners for Sheriff should be ephemeral: one job each. The planner and the reviewer read the job's workspace,
+and a persistent runner shares that workspace with the repository's other jobs.
+
+ Sheriff's secrets stay in the `sheriff` and `sheriff-review` environments, which only
 the default branch can use, so a job from a pull request branch cannot read them on any runner.
 
 ## Tracking work with Issues and Projects
@@ -236,6 +309,9 @@ The board has these views:
 
 - The App key and the reviewer keys are in separate environments. No job that reads pull request content has the
   App key.
+- The planner runs in `sheriff-review`, read-only, with no shell. It sees only comments from trusted authors. The App
+  needs Issues: Read and write to post plans; with `SHERIFF_PLAN_WEB=any`, text in an issue could make the planner fetch
+  an outside URL (see [Planning](#planning)).
 - Pull request code is never executed. Every trigger runs the default branch's copy of `sheriff.yml`. The reviewer
   only gets read-only file tools, with no shell.
 - The `Review` result is a check run that only your Sheriff App can write. It is tied to one commit and its merge
@@ -257,6 +333,8 @@ The board has these views:
   admins should use separate Apps.
 - **Forks.** Pull requests from forks aren't reviewed automatically. Start a review with
   `gh workflow run sheriff.yml -f pr=<n> -f review=true`.
+- **Commands during a plan.** A `/sheriff plan` or `/sheriff replan` posted while a plan is being written waits for the
+  next command.
 - **Per-PR limits.** The review limit counts per pull request. A new pull request starts with a fresh limit.
 - **Status needs a permission.** The board's built-in `Status` mirrors `Stage` and needs the App's organization
   permission Projects: Read and write (`install` requests it for organization Apps; `doctor` checks it). GitHub Apps
@@ -281,7 +359,9 @@ Sheriff is standard-library Python and `gh`.
 | `scripts/` | The logic |
 | `templates/` | The two files `install` adds to a repository |
 
-`v1` is a moving tag that receives fixes. Changes that need new permissions in `sheriff.yml` will ship as `v2`.
+`v1` is a moving tag that receives fixes. A new permission that only jobs or inputs a new template adds ask for ships
+in `v1`, because old templates never run those jobs. A changed permission on a job an old template already runs ships
+as `v2`.
 
 Issues and pull requests are welcome.
 

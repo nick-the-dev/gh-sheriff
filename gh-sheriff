@@ -25,7 +25,7 @@ REVIEW_ENVIRONMENT = "sheriff-review"
 RULESET = "Sheriff"
 STATUSES = ("Review", "Merge gate")
 CONFIG = pathlib.Path(os.environ.get("SHERIFF_CONFIG") or (pathlib.Path.home() / ".config" / "sheriff" / "apps.json"))
-GATE_PERMISSIONS = {"statuses": "write", "checks": "write", "pull_requests": "write", "issues": "read", "contents": "read",
+GATE_PERMISSIONS = {"statuses": "write", "checks": "write", "pull_requests": "write", "issues": "write", "contents": "read",
                     "actions": "read", "metadata": "read"}
 REVIEWERS_SPEC = importlib.util.spec_from_file_location("sheriff_reviewers", HOME / "scripts" / "reviewers.py")
 REVIEWERS = importlib.util.module_from_spec(REVIEWERS_SPEC)
@@ -41,6 +41,9 @@ SPEC.loader.exec_module(APP)
 WORK_SPEC = importlib.util.spec_from_file_location("sheriff_work", HOME / "scripts" / "work.py")
 WORK = importlib.util.module_from_spec(WORK_SPEC)
 WORK_SPEC.loader.exec_module(WORK)
+PLAN_SPEC = importlib.util.spec_from_file_location("sheriff_plan", HOME / "scripts" / "plan.py")
+PLAN = importlib.util.module_from_spec(PLAN_SPEC)
+PLAN_SPEC.loader.exec_module(PLAN)
 FIELD_SPECS = (("Stage", "SINGLE_SELECT", WORK.STAGES), ("Verify by", "SINGLE_SELECT", WORK.VERIFY), ("Next action", "TEXT", ()))
 FIELD_TYPES = {"SINGLE_SELECT": "IssueFieldSingleSelect", "TEXT": "IssueFieldText"}
 OPTION_COLORS = ("GRAY", "BLUE", "PURPLE", "YELLOW", "GREEN", "RED")
@@ -222,10 +225,14 @@ def key_from_downloads(slug, since):
     raise SheriffError("no new private key for " + slug + " appeared in ~/Downloads within 15 minutes")
 
 
+def app_settings_url(info, slug):
+    return ("https://github.com/organizations/%s/settings/apps/%s" % (info["owner"], slug) if info["kind"] == "Organization"
+            else "https://github.com/settings/apps/" + slug)
+
+
 def existing_app_key(info, slug):
     app_id = known_app_id(slug)
-    settings = ("https://github.com/organizations/%s/settings/apps/%s" % (info["owner"], slug) if info["kind"] == "Organization"
-                else "https://github.com/settings/apps/" + slug)
+    settings = app_settings_url(info, slug)
     if app_id is None:
         typed = input("App ID of " + slug + " (shown at the top of " + settings + "): ").strip()
         if not typed.isdigit():
@@ -950,8 +957,62 @@ def status_differs(title):
         return 0
 
 
+def plan_secrets(repo):
+    try:
+        return {REVIEWERS.SECRETS[REVIEWERS.parse_spec(repo_variable(repo, "SHERIFF_PLAN_MODEL") or PLAN.DEFAULT_MODEL)[0]]}
+    except REVIEWERS.ReviewerError:
+        return set()
+
+
+def plan_permission_problem(info, slug):
+    try:
+        granted = (gh_json(["api", "apps/" + slug]) or {}).get("permissions") or {}
+    except SheriffError:
+        return None
+    if granted.get("issues") == "write":
+        return None
+    return ("the App " + slug + " lacks 'Issues: Read and write', so it cannot post plans: open " + app_settings_url(info, slug) +
+            "/permissions, set Repository permissions > Issues: Read and write, save, then accept the new permission request on the installation" +
+            (" (an organization owner must accept it)" if info["kind"] == "Organization" else ""))
+
+
+def plan_problems(info, slug):
+    repo, problems = info["repo"], []
+    if not repo_variable(repo, "SHERIFF_PLAN_SINCE"):
+        problems.append("repository variable SHERIFF_PLAN_SINCE is not set while SHERIFF_PLAN is on: gh sheriff install --plan on sets it")
+    try:
+        REVIEWERS.web_tools(repo_variable(repo, "SHERIFF_PLAN_WEB"), repo_variable(repo, "SHERIFF_PLAN_FETCH_DOMAINS"))
+        REVIEWERS.parse_spec(repo_variable(repo, "SHERIFF_PLAN_MODEL") or PLAN.DEFAULT_MODEL)
+    except REVIEWERS.ReviewerError as exc:
+        problems.append(str(exc))
+    problem = plan_permission_problem(info, slug)
+    return problems + ([problem] if problem else [])
+
+
+def ensure_planning(info, choice, new_install):
+    repo = info["repo"]
+    current, since = repo_variable(repo, "SHERIFF_PLAN"), repo_variable(repo, "SHERIFF_PLAN_SINCE")
+    was_on = PLAN.planning_on(current)
+    if choice is None and new_install and not current:
+        choice = "on"
+    on = choice == "on" or (choice is None and was_on)
+    if choice:
+        set_variable(repo, "SHERIFF_PLAN", choice)
+    if on and not (was_on and since):
+        set_variable(repo, "SHERIFF_PLAN_SINCE", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+    if not on:
+        say("--  planning is off (gh sheriff install --plan on turns it on)")
+        return set()
+    say("ok  planning is on: task issues get a Sheriff plan, and Merge gate waits for a review against it")
+    problem = plan_permission_problem(info, slug_for(info["owner"]))
+    if problem:
+        say("!!  " + problem)
+    return plan_secrets(repo)
+
+
 def install(args):
     info = repo_info(resolve_repo(args.repo))
+    new = not repo_variable(info["repo"], "SHERIFF_APP_SLUG")
     if not info["admin"]:
         raise SheriffError("installing Sheriff needs admin rights on " + info["repo"])
     say("Sheriff for " + info["repo"] + " (" + ("organisation" if info["kind"] == "Organization" else "personal account") + ", default branch " + info["branch"] + ")")
@@ -964,7 +1025,8 @@ def install(args):
     set_variable(info["repo"], "SHERIFF_APP_SLUG", slug_for(info["owner"]))
     ensure_installed(info, app_id, pem, sys.stdin.isatty() and not args.yes)
     interactive = sys.stdin.isatty() and not args.yes
-    ensure_secrets(info, choose_reviewers(info, args.first_pass, args.review_model, interactive), args.rotate_secrets)
+    ensure_secrets(info, sorted(set(choose_reviewers(info, args.first_pass, args.review_model, interactive)) | ensure_planning(info, args.plan, new)),
+                   args.rotate_secrets)
     if args.no_files and not trigger_files_current(info):
         ensure_auto_merge(info)
         say("--  stopped before the trigger files (--no-files): add .github/workflows/sheriff.yml and sheriff-relay.yml from")
@@ -998,6 +1060,10 @@ def doctor(args):
             spec = None
         if spec:
             review_needed.append(REVIEWERS.SECRETS[spec[0]])
+    planning = PLAN.planning_on(repo_variable(repo, "SHERIFF_PLAN"))
+    if planning:
+        review_needed += plan_secrets(repo)
+        problems += plan_problems(info, slug)
     review_present = env_secret_names(repo, REVIEW_ENVIRONMENT)
     for name in sorted(set(review_needed)):
         if name not in review_present:
@@ -1088,6 +1154,20 @@ def usage_rows(repo, app_id, limit):
     return rows
 
 
+def plan_rows(repo, slug, limit):
+    rows = []
+    for page_number in range(1, 11):
+        page = gh_json(["api", "repos/%s/issues/comments?sort=created&direction=desc&per_page=100&page=%d" % (repo, page_number)]) or []
+        for comment in page:
+            body = comment.get("body") or ""
+            usage = PLAN.usage_of(body)
+            if (comment.get("user") or {}).get("login") == slug + "[bot]" and PLAN.PLAN_MARKER.fullmatch(PLAN.first_line(body)) and usage:
+                rows.append({"pr": None, "stage": "plan", "model": usage.get("model"), "usage": usage.get("usage") or {}})
+        if len(page) < 100 or len(rows) >= limit:
+            break
+    return rows[:limit]
+
+
 def summarise(rows):
     by_model = {}
     for row in rows:
@@ -1096,7 +1176,7 @@ def summarise(rows):
         entry["tokens"] += tokens(row["usage"])
         entry["tokens_no_reads"] += tokens(row["usage"], with_reads=False)
         entry["cost"] += float(row["usage"].get("cost_usd") or 0)
-    total = {key: sum(entry[key] for entry in by_model.values()) for key in ("reviews", "tokens", "tokens_no_reads", "cost")}
+    total = {key: sum(entry[key] for (stage, _), entry in by_model.items() if stage in ("first", "final")) for key in ("reviews", "tokens", "tokens_no_reads", "cost")}
     smart = {key: sum(entry[key] for (stage, _), entry in by_model.items() if stage == "final") for key in total}
     share = {key: (smart[key] / total[key] * 100 if total[key] else 0.0) for key in total}
     return by_model, total, share
@@ -1105,11 +1185,12 @@ def summarise(rows):
 def stats(args):
     info = repo_info(resolve_repo(args.repo))
     app_id = known_app_id(slug_for(info["owner"]))
-    by_model, total, share = summarise(usage_rows(info["repo"], app_id, args.prs))
+    slug = slug_for(info["owner"])
+    by_model, total, share = summarise(usage_rows(info["repo"], app_id, args.prs) + plan_rows(info["repo"], slug, args.prs))
     say("Sheriff reviews on the last " + str(args.prs) + " pull requests of " + info["repo"])
     for (stage, model), entry in sorted(by_model.items()):
-        say("  %-6s %-40s %4d reviews  %12d tokens  %12d without cache reads  $%.2f" % (
-            stage, model, entry["reviews"], entry["tokens"], entry["tokens_no_reads"], entry["cost"]))
+        say("  %-6s %-40s %4d %-7s %12d tokens  %12d without cache reads  $%.2f" % (
+            stage, model, entry["reviews"], "plans" if stage == "plan" else "reviews", entry["tokens"], entry["tokens_no_reads"], entry["cost"]))
     say("  smart-model (final reviewer) share: %.1f%% of tokens, %.1f%% without cache reads, %.1f%% of reviews, %.1f%% of cost" % (
         share["tokens"], share["tokens_no_reads"], share["reviews"], share["cost"]))
     limit = float(repo_variable(info["repo"], "SHERIFF_SMART_SHARE_LIMIT") or args.limit)
@@ -1132,6 +1213,7 @@ def main(argv=None):
     install_parser.add_argument("--rotate-secrets", action="store_true", help="replace the stored reviewer keys")
     install_parser.add_argument("--first-pass", help="cheap first-pass reviewer as provider:model, or '' for none")
     install_parser.add_argument("--review-model", help="final reviewer as provider:model (default claude:claude-opus-5-5)")
+    install_parser.add_argument("--plan", choices=("on", "off"), help="plan task issues before review (default: on for a new install)")
     install_parser.add_argument("--no-browser", action="store_true", help="print the pages to open instead of opening them")
     install_parser.add_argument("--no-files", action="store_true", help="do not open a pull request with the trigger files; add them yourself")
     install_parser.add_argument("--no-work-state", action="store_true", help="skip the issue fields and the project board")
