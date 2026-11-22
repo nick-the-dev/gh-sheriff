@@ -160,8 +160,8 @@ class FactsTests(unittest.TestCase):
 ROLES = {"boss": "maintain", "chief": "admin"}
 
 
-def decide(issue, rounds=3):
-    return plan.decide(issue, APP, lambda login: ROLES.get(login, "write"), ("helper",), ("friend",), rounds, NOW)
+def decide(issue, rounds=3, opened=True):
+    return plan.decide(issue, APP, lambda login: ROLES.get(login, "write"), ("helper",), ("friend",), rounds, NOW, opened)
 
 
 class DecideTests(unittest.TestCase):
@@ -243,13 +243,27 @@ class DecideTests(unittest.TestCase):
         result = decide(task(used + [replan, noted, note("boss", "/sheriff plan", "2026-11-22T10:05:00Z")]))
         self.assertEqual((result["version"], result["reason"], result["requester"]), (4, "again", "lane[bot]"))
 
+    def test_a_maintainer_cannot_unlock_a_replan_they_posted_after_the_budget_note(self):
+        used = [planned(1, "2026-11-22T08:00:00Z"), planned(2, "2026-11-22T08:30:00Z"), planned(3, "2026-11-22T09:00:00Z")]
+        noted = note(APP, "limit\n\n<!-- sheriff-plan-budget -->", "2026-11-22T10:01:00Z", bot=True)
+        mine = note("chief", "/sheriff replan again", "2026-11-22T10:02:00Z")
+        unlock = note("chief", "/sheriff plan", "2026-11-22T10:03:00Z")
+        self.assertEqual(decide(task(used + [noted, mine, unlock]))["why"], "plan budget used")
+        other = note("boss", "/sheriff plan", "2026-11-22T10:04:00Z")
+        self.assertEqual(decide(task(used + [noted, mine, unlock, other]))["action"], "plan")
+
+    def test_a_trusted_author_triggers_a_plan_only_on_the_opened_event(self):
+        self.assertEqual(decide(task(), opened=False)["why"], "waiting for /sheriff plan from a maintainer")
+        self.assertEqual(decide(task(), opened=True)["version"], 1)
+        self.assertEqual(decide(task([note("boss", "/sheriff plan")], author="stranger"), opened=False)["action"], "plan")
+
     def test_a_long_reason_is_cut(self):
         result = decide(task([planned(1), note("boss", "/sheriff replan " + "x" * 5000, "2026-11-22T11:00:00Z")]))
         self.assertEqual(len(result["reason"]), plan.REASON_LIMIT)
 
 
 class ReserveTests(unittest.TestCase):
-    def reserve(self, issue, login=APP + "[bot]"):
+    def reserve(self, issue, login=APP + "[bot]", event="opened"):
         outs, posts = [], []
 
         def fake(args):
@@ -262,7 +276,7 @@ class ReserveTests(unittest.TestCase):
         with mock.patch.object(plan, "read_issue", return_value=issue), mock.patch.object(plan, "gh_json", side_effect=fake), \
              mock.patch.object(plan, "output", side_effect=lambda **values: outs.append(values)), mock.patch("sys.stderr"), \
              mock.patch.dict(os.environ, {"GH_REPO": "o/r", "GH_ACTOR_LOGIN": login, "GITHUB_SERVER_URL": "https://h", "GITHUB_REPOSITORY": "o/r", "GITHUB_RUN_ID": "9"}):
-            code = plan.main(["reserve", "--issue", "12", "--rounds", "3", "--ack-authors", "", "--unlock-authors", ""])
+            code = plan.main(["reserve", "--issue", "12", "--rounds", "3", "--ack-authors", "", "--unlock-authors", "", "--event", event])
         return code, outs, posts
 
     def test_a_plan_is_reserved_with_a_start_comment_before_any_model_runs(self):
@@ -289,6 +303,10 @@ class ReserveTests(unittest.TestCase):
         self.assertEqual(posts[0]["body"].splitlines()[-1], "<!-- sheriff-plan-budget -->")
         self.assertEqual(outs[-1]["skip"], "plan budget used")
 
+    def test_without_the_opened_event_a_trusted_authors_issue_is_not_reserved(self):
+        code, outs, posts = self.reserve(task(), event="created")
+        self.assertEqual((code, posts, outs[-1]["skip"]), (0, [], "waiting for /sheriff plan from a maintainer"))
+
     def test_a_skip_posts_nothing_and_without_the_apps_login_nothing_runs(self):
         self.assertEqual(self.reserve(task([planned(1)]))[2], [])
         self.assertEqual(self.reserve(task(), login="")[0], 1)
@@ -310,6 +328,11 @@ class CommentTextTests(unittest.TestCase):
         self.assertIn("Comment `/sheriff plan` (or `/sheriff replan <reason>`) to try again.", body)
         self.assertEqual(body.count("<!--"), 1)
         self.assertEqual(plan.plans([note(APP + "[bot]", body, bot=True)], APP), [])
+
+    def test_escaping_cannot_push_a_failure_reason_past_the_limit(self):
+        body = plan.failure_note(1, "<!--" * 100)
+        reason = body.splitlines()[1].split(": ", 1)[1].rsplit(". Comment", 1)[0]
+        self.assertEqual(len(reason), plan.FAILURE_LIMIT)
 
     def test_usage_is_read_from_the_last_line(self):
         self.assertEqual(plan.usage_of(self.BODY), {"provider": "claude", "model": "m", "usage": {"input": 1}})

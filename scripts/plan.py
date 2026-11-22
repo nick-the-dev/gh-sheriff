@@ -187,7 +187,7 @@ def supersede(body, newer):
 
 def failure_note(version, why):
     return ("<!-- sheriff-plan-failed v=" + str(version) + " -->\nSheriff could not write plan v" + str(version) + ": "
-            + escape(str(why)[:FAILURE_LIMIT]) + ". Comment `/sheriff plan` (or `/sheriff replan <reason>`) to try again.")
+            + escape(str(why))[:FAILURE_LIMIT] + ". Comment `/sheriff plan` (or `/sheriff replan <reason>`) to try again.")
 
 
 def usage_of(body):
@@ -234,13 +234,13 @@ def unlocks_of(comments, budgets, marks, role, unlockers):
             continue
         budget = earlier[-1]
         before = max([at for at, _ in marks if at < budget["created"]], default="")
-        asked = {c["author"] for c in comments if before < c["created"] < budget["created"] and not c["edited"] and REPLAN_COMMAND.match(c["body"])}
+        asked = {c["author"] for c in comments if before < c["created"] < comment["created"] and not c["edited"] and REPLAN_COMMAND.match(c["body"])}
         if comment["author"] not in asked and (comment["author"].lower() in unlockers or role(comment["author"]) in MAINTAINER_ROLES):
             found.append((budget, comment))
     return found
 
 
-def decide(issue, slug, role, ack, unlockers, rounds, now):
+def decide(issue, slug, role, ack, unlockers, rounds, now, opened=False):
     def result(action, why, version=0, reason="", requester=""):
         return {"action": action, "why": why, "version": version, "reason": reason, "requester": requester}
     why = plannable(issue)
@@ -274,7 +274,7 @@ def decide(issue, slug, role, ack, unlockers, rounds, now):
         replan, reason = newest_replan(comments, since, role, ack)
         if replan:
             requester = replan["author"]
-        elif not (asks or (not since and trusted(issue["author"], issue["author_bot"], role, ack))):
+        elif not (asks or (opened and not since and trusted(issue["author"], issue["author_bot"], role, ack))):
             return result("skip", "waiting for /sheriff plan from a maintainer")
     version = latest + 1
     if latest >= rounds + len(unlocked) or failures >= FAILURES_ALLOWED:
@@ -319,7 +319,7 @@ def reserve(args):
     issue = read_issue(args.issue, gh_json)
     if issue is None:
         return output(skip="issue not found", **empty)
-    decided = decide(issue, slug, make_role(), logins(args.ack_authors), logins(args.unlock_authors), args.rounds, datetime.datetime.now(datetime.timezone.utc))
+    decided = decide(issue, slug, make_role(), logins(args.ack_authors), logins(args.unlock_authors), args.rounds, datetime.datetime.now(datetime.timezone.utc), args.event == "opened")
     if decided["action"] == "skip":
         return output(skip=decided["why"], **empty)
     if decided["action"] == "budget":
@@ -346,6 +346,7 @@ def main(argv=None):
     r.add_argument("--rounds", type=int, default=3)
     r.add_argument("--ack-authors", default="")
     r.add_argument("--unlock-authors", default="")
+    r.add_argument("--event", default="")
     args = parser.parse_args(argv)
     try:
         reserve(args)
