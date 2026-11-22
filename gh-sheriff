@@ -993,9 +993,16 @@ def ensure_planning(info, choice, new_install):
     repo = info["repo"]
     current, since = repo_variable(repo, "SHERIFF_PLAN"), repo_variable(repo, "SHERIFF_PLAN_SINCE")
     was_on = PLAN.planning_on(current)
-    if choice is None and new_install and not current:
-        choice = "on"
-    on = choice == "on" or (choice is None and was_on)
+    default = choice is None and new_install and not current
+    on = choice == "on" or default or (choice is None and was_on)
+    problem = plan_permission_problem(info, slug_for(info["owner"])) if on else None
+    if problem and choice == "on":
+        raise SheriffError(problem + "; then run gh sheriff install --plan on again")
+    if problem and default:
+        say("!!  " + problem)
+        say("--  planning stays off until the App can post plans: grant the permission, then run gh sheriff install --plan on")
+        return set()
+    choice = "on" if default else choice
     if choice:
         set_variable(repo, "SHERIFF_PLAN", choice)
     if on and not (was_on and since):
@@ -1004,7 +1011,6 @@ def ensure_planning(info, choice, new_install):
         say("--  planning is off (gh sheriff install --plan on turns it on)")
         return set()
     say("ok  planning is on: task issues get a Sheriff plan, and Merge gate waits for a review against it")
-    problem = plan_permission_problem(info, slug_for(info["owner"]))
     if problem:
         say("!!  " + problem)
     return plan_secrets(repo)

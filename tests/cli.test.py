@@ -510,12 +510,14 @@ class StatusMirrorTests(unittest.TestCase):
 
 
 class PlanningInstallTests(unittest.TestCase):
-    def run_planning(self, variables, choice=None, new=False):
-        written = {}
+    PROBLEM = "the App o-sheriff lacks 'Issues: Read and write', so it cannot post plans: open https://github.com/organizations/o/settings/apps/o-sheriff/permissions"
+
+    def run_planning(self, variables, choice=None, new=False, problem=None):
+        self.written, self.out = {}, io.StringIO()
         with mock.patch.object(cli, "repo_variable", side_effect=lambda repo, name: variables.get(name, "")), \
-             mock.patch.object(cli, "set_variable", side_effect=lambda repo, name, value: written.__setitem__(name, value)), \
-             mock.patch.object(cli, "plan_permission_problem", return_value=None), mock.patch("sys.stdout", io.StringIO()):
-            return cli.ensure_planning(ORG, choice, new), written
+             mock.patch.object(cli, "set_variable", side_effect=lambda repo, name, value: self.written.__setitem__(name, value)), \
+             mock.patch.object(cli, "plan_permission_problem", return_value=problem), mock.patch("sys.stdout", self.out):
+            return cli.ensure_planning(ORG, choice, new), self.written
 
     def test_a_new_install_turns_planning_on_with_its_start_time(self):
         secrets, written = self.run_planning({}, new=True)
@@ -538,6 +540,21 @@ class PlanningInstallTests(unittest.TestCase):
         secrets, written = self.run_planning({"SHERIFF_PLAN": "on"})
         self.assertEqual(set(written), {"SHERIFF_PLAN_SINCE"})
         self.assertEqual(secrets, {"CLAUDE_CODE_OAUTH_TOKEN"})
+
+    def test_a_new_install_whose_app_cannot_post_plans_leaves_planning_off_and_prints_the_grant_steps(self):
+        self.assertEqual(self.run_planning({}, new=True, problem=self.PROBLEM), (set(), {}))
+        self.assertIn("!!  " + self.PROBLEM, self.out.getvalue())
+        self.assertIn("gh sheriff install --plan on", self.out.getvalue())
+        self.assertEqual(self.run_planning({"SHERIFF_PLAN": "on", "SHERIFF_PLAN_SINCE": "2026-01-01T00:00:00Z"}, problem=self.PROBLEM),
+                         ({"CLAUDE_CODE_OAUTH_TOKEN"}, {}))
+        self.assertIn("!!  " + self.PROBLEM, self.out.getvalue())
+
+    def test_an_explicit_plan_on_whose_app_cannot_post_plans_stops_with_the_grant_steps(self):
+        for variables in ({}, {"SHERIFF_PLAN": "off"}, {"SHERIFF_PLAN": "on", "SHERIFF_PLAN_SINCE": "2026-01-01T00:00:00Z"}):
+            with self.subTest(variables=variables):
+                with self.assertRaisesRegex(cli.SheriffError, "lacks 'Issues: Read and write'.*then run gh sheriff install --plan on again"):
+                    self.run_planning(variables, "on", new=True, problem=self.PROBLEM)
+                self.assertEqual(self.written, {})
 
     def test_install_takes_the_plan_option(self):
         with mock.patch.object(cli, "install", side_effect=lambda args: self.assertEqual(args.plan, "on")):

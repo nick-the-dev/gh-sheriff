@@ -95,7 +95,8 @@ It does the following:
 2. Creates a GitHub App for your account (one click in the browser). Only this App can post the `Review` and
    `Merge gate` results.
 3. Asks which reviewers to use and stores their keys.
-   A new install also turns planning on (`--plan off` skips it) and sets `SHERIFF_PLAN_SINCE`.
+   A new install also turns planning on (`--plan off` skips it) and sets `SHERIFF_PLAN_SINCE`. If the App cannot post
+   plans yet, planning stays off and install prints how to grant the permission.
 4. Opens a pull request that adds `.github/workflows/sheriff.yml` and `sheriff-relay.yml`. Sheriff reviews that pull
    request, and it merges itself. It also lists your repository's workflows that run on pull requests in
    `sheriff.yml`, so the merge gate re-runs as soon as one of them finishes; those runs never start a review. Run
@@ -161,8 +162,8 @@ emergency, and the gate says so in its description.
 **App permission.** Posting plans needs the App's repository permission Issues: Read and write. Apps created by an
 earlier Sheriff only have read. To grant it, open the App's settings, then Permissions, set Repository permissions >
 Issues to Read and write and save. Then accept the new permission request on the installation (an organization owner
-has to). `gh sheriff doctor` checks this, and `gh sheriff stats` lists plans next to reviews, outside the smart-model
-share.
+has to). Until then, a new install leaves planning off, and `--plan on` stops with these steps. `gh sheriff doctor`
+checks this, and `gh sheriff stats` lists plans next to reviews, outside the smart-model share.
 
 ## What your agents need
 
@@ -225,7 +226,7 @@ All settings are repository variables. All are optional.
 | `SHERIFF_FIRST_PASS` | none | Cheap reviewer, e.g. `opencode:opencode-go/deepseek-v4.1-flash` |
 | `SHERIFF_REVIEW_MODEL` | `claude:claude-opus-5-5` | Final reviewer |
 | `SHERIFF_FIRST_PASS_ROUNDS`, `SHERIFF_REVIEW_ROUNDS` | `3`, `3` | Reviews allowed per pull request |
-| `SHERIFF_PLAN` | `on` for a new install, else off | `on` turns planning on. Anything else means off |
+| `SHERIFF_PLAN` | `on` for a new install whose App can post plans, else off | `on` turns planning on. Anything else means off |
 | `SHERIFF_PLAN_SINCE` | set by `install` | Pull requests opened before this time (UTC, `2026-11-22T00:00:00Z`) need no plan |
 | `SHERIFF_PLAN_MODEL` | `claude:claude-opus-5-5` | Planner model |
 | `SHERIFF_PLAN_ROUNDS` | `3` | Plans allowed per issue |
