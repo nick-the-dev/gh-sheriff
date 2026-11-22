@@ -56,35 +56,35 @@ see. The verdict is a check run that only Sheriff's App can write. A no-bypass r
 ## How it works
 
 ```mermaid
-flowchart LR
-    A[Agent pushes a PR head] --> R[Sheriff Relay<br/>no permissions]
-    R --> S[sheriff.yml<br/>default branch copy]
-    S --> RES[Reserve the round<br/>gate App]
-    RES --> C{Cheap reviewer}
-    C -- blocked --> P[Post verdict]
-    C -- clean, code --> F{Final reviewer}
-    C -- clean, docs only --> P
-    F --> P
-    P --> CHK[Review check run<br/>gate App only]
-    S --> G[Merge gate status<br/>comments, production]
-    CHK --> RS[Ruleset: no bypass]
-    G --> RS
-    RS --> M[Auto-merge]
-    M --> D[Your deploy] --> W[Work state:<br/>Merged, Released, Verified]
+flowchart TD
+    A[Agent opens or updates a pull request] --> B[1. Sheriff records the review round]
+    B --> C{2. Cheap AI review}
+    C -->|problem found| X[Blocked: the agent fixes it and pushes again]
+    C -->|clean| D{3. Smart AI review}
+    D -->|problem found| X
+    X -.-> A
+    D -->|clean| E{4. Merge gate: comments answered, production healthy}
+    E -->|yes| F[5. GitHub merges it]
+    F --> G[6. Your deploy ships it]
+    G --> H[7. The task moves to Released, then Verified]
 ```
 
-1. `sheriff-relay.yml` runs on pull request events with no permissions at all. Its only job is to wake
-   `sheriff.yml`.
-2. `sheriff.yml` always runs the default branch's copy, never the pull request's. It calls Sheriff's shared workflows
-   for the gate, the review and the work state.
-3. **Reserve.** Sheriff's gate App records the round on the pull request. If the budget is used up, it publishes a
-   blocked verdict at once and no model runs.
-4. **Review.** A separate job holds only the reviewer keys. It checks out the head as data. The reviewer gets
-   read-only tools (read, grep, glob) and no shell, plus your project's rules from the default branch.
-5. **Post.** The gate App replaces the reservation with the verdict and creates the `Review` check run on that head.
-6. **Merge.** The ruleset requires `Review` and `Merge gate` from the gate App. Auto-merge does the rest.
-7. **After the deploy**, your deploy workflow dispatches `sheriff.yml`. That refreshes `Merge gate` and moves the
-   work items to Released.
+1. **Record the round.** Before any AI runs, Sheriff counts the round, so a cancelled or re-run review still uses up
+   budget.
+2. **Cheap review.** A low-cost model reviews the change. Docs-only changes stop here.
+3. **Smart review.** Only a clean cheap review reaches the smart model, Claude Opus by default.
+4. **Merge gate.** Every comment from a person has an agent's answer, and production is healthy (if you configured it).
+5. **Merge.** GitHub merges the pull request the moment both are green. Nobody can bypass this, admins included.
+6. **Deploy.** Your own deploy workflow runs as usual.
+7. **Work state.** The task's issue moves on its own and closes when it is verified.
+
+Under the hood:
+
+- The verdict is a `Review` check run that only your Sheriff App can write.
+- Pull request code is only ever read, never run.
+- Reviewer keys and the App key live in separate environments.
+
+[Security model](#security-model) has the details.
 
 ## Quick start
 
