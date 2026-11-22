@@ -224,7 +224,7 @@ def pull_comments(number, reviews):
     return [row for row in rows if isinstance(row, dict) and text(row).strip()]
 
 
-def evaluate(number, prod_failures, listed, override, dry_run, prod_checked=True, default_branch=""):
+def judge(number, prod_failures, listed, override, dry_run, prod_checked=True, default_branch="", quiet=False):
     view = gh_json(["pr", "view", str(number), "--json", "state,headRefOid,baseRefName"])
     head = str(view.get("headRefOid") or "")
     if str(view.get("state") or "").upper() != "OPEN" or len(head) != 40:
@@ -235,19 +235,34 @@ def evaluate(number, prod_failures, listed, override, dry_run, prod_checked=True
         reviews = gh_pages("repos/{owner}/{repo}/pulls/" + str(number) + "/reviews")
         comments = pull_comments(number, reviews)
     except GateError as exc:
-        post(head, MERGE_CONTEXT, "error", "cannot read this pull request: " + str(exc), dry_run)
+        if not quiet:
+            post(head, MERGE_CONTEXT, "error", "cannot read this pull request: " + str(exc), dry_run)
         raise
     decision = "CHANGES_REQUESTED" if changes_requested(reviews) else ""
-    current = current_statuses(head)
-    return {"pr": number, "head": head, "statuses": [
-        post(head, MERGE_CONTEXT, *merge_status(number, comments, prod_failures, listed, override,
-                                                decision, prod_checked), dry_run, current),
-    ]}
+    state, description = merge_status(number, comments, prod_failures, listed, override, decision, prod_checked)
+    return {"pr": number, "head": head, "state": state, "description": description, "quiet": quiet,
+            "current": None if quiet else current_statuses(head)}
 
 
-def open_pulls():
-    rows = gh_json(["pr", "list", "--state", "open", "--limit", "1000", "--json", "number"])
-    return [row["number"] for row in rows if isinstance(row, dict) and isinstance(row.get("number"), int)]
+def publish(judged, dry_run):
+    if "state" not in judged:
+        return judged
+    return {"pr": judged["pr"], "head": judged["head"], "statuses": [
+        post(judged["head"], MERGE_CONTEXT, judged["state"], judged["description"], dry_run, judged["current"])]}
+
+
+def serialize(judged, armed):
+    passing = sorted(number for number, item in judged.items() if number in armed and item.get("state") == "success")
+    if not passing:
+        return
+    for number in passing[1:]:
+        judged[number]["state"] = "pending"
+        judged[number]["description"] = "one merge per deploy: waiting for #" + str(passing[0])
+
+
+def open_rows():
+    rows = gh_json(["pr", "list", "--state", "open", "--limit", "1000", "--json", "number,autoMergeRequest,baseRefName,headRefOid"])
+    return [row for row in rows if isinstance(row, dict) and isinstance(row.get("number"), int)]
 
 
 def main(argv=None):
@@ -258,7 +273,8 @@ def main(argv=None):
     try:
         listed = ack_authors()
         default_branch = setting("SHERIFF_DEFAULT_BRANCH") or gh(["api", "repos/{owner}/{repo}", "--jq", ".default_branch"]).strip()
-        numbers = args.pr or open_pulls()
+        rows = open_rows()
+        numbers = args.pr or [row["number"] for row in rows]
         prod_settings = (setting("SHERIFF_VERSION_URL"), setting("SHERIFF_HEALTH_URL"), setting("SHERIFF_DEPLOY_WORKFLOW"))
         try:
             prod = production_failures(*prod_settings) if numbers else []
@@ -268,21 +284,29 @@ def main(argv=None):
     except GateError as exc:
         print(json.dumps({"ok": False, "error": str(exc)}), flush=True)
         return 1
-    results, queue, swept = [], list(numbers), not args.pr
+    armed = {row["number"] for row in rows if row.get("autoMergeRequest") and row.get("baseRefName") == default_branch}
+    judged, queue, swept = {}, list(numbers), not args.pr
+
+    def run(number, quiet=False):
+        try:
+            judged[number] = judge(number, prod, listed, override, args.dry_run, any(prod_settings), default_branch, quiet)
+        except GateError as exc:
+            judged[number] = {"pr": number, "error": str(exc), "quiet": quiet}
+
     while queue:
         number = queue.pop(0)
-        try:
-            result = evaluate(number, prod, listed, override, args.dry_run, any(prod_settings), default_branch)
-        except GateError as exc:
-            result = {"pr": number, "error": str(exc)}
-        results.append(result)
-        if result.get("skipped") and not swept:
+        run(number)
+        if "skipped" in judged[number] and not swept:
             swept = True
-            seen = {item.get("pr") for item in results} | set(queue)
-            try:
-                queue += [other for other in open_pulls() if other not in seen]
-            except GateError as exc:
-                results.append({"sweep": True, "error": str(exc)})
+            queue += [other["number"] for other in rows if other["number"] not in judged and other["number"] not in queue]
+        elif not swept and number not in armed and "state" in judged[number]:
+            queue += sorted(other for other in armed if other not in judged and other not in queue)
+    for number in args.pr:
+        if number in armed and judged[number].get("state") == "success":
+            for lower in sorted(other for other in armed if other < number and other not in judged):
+                run(lower, quiet=True)
+    serialize(judged, armed)
+    results = [publish(item, args.dry_run) for item in judged.values() if not item.get("quiet")]
     failed = any("error" in item for item in results)
     print(json.dumps({"ok": not failed, "results": results}, ensure_ascii=False), flush=True)
     return 1 if failed else 0

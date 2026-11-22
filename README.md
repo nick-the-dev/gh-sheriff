@@ -56,6 +56,9 @@ flowchart TB
 4. The `Merge gate` check passes when two things hold:
    - every comment from a person has an agent reply;
    - production is healthy, if you configured a health check.
+
+   If several pull requests have auto-merge on, only the lowest-numbered one that would pass gets a green `Merge gate`.
+   The others stay pending ("one merge per deploy: waiting for #N") until it merges, so merges follow one per deploy.
 5. When `Review` and `Merge gate` are both green, GitHub merges the pull request automatically.
 6. Your deploy workflow runs. When production serves the merged commit, Sheriff marks the task Released.
 7. Someone checks the change in production and records it with `gh sheriff task verify`. The task becomes Verified.

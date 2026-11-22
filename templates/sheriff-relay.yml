@@ -5,7 +5,7 @@ name: Sheriff Relay
 # always runs on a fresh GitHub-hosted machine, so a pull request cannot use it to plant files on a shared runner.
 on:
   pull_request:
-    types: [opened, reopened, synchronize, ready_for_review, edited, closed]
+    types: [opened, reopened, synchronize, ready_for_review, edited, closed, auto_merge_enabled, auto_merge_disabled]
   pull_request_review:
     types: [submitted, edited, dismissed]
   pull_request_review_comment:

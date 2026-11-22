@@ -134,7 +134,7 @@ class EvaluateTests(unittest.TestCase):
              mock.patch.object(status, "gh_pages", side_effect=pages or (lambda path: [])), \
              mock.patch.object(status, "gh", side_effect=lambda args: posted.append(args) or ""), \
              mock.patch.dict(os.environ, {"GH_ACTOR_LOGIN": "gate[bot]"}):
-            result = status.evaluate(7, [], NOBODY, "", False, True, "main")
+            result = status.publish(status.judge(7, [], NOBODY, "", False, True, "main"), False)
         return result, posted
 
     def test_only_merge_gate_is_posted(self):
@@ -166,17 +166,17 @@ class EvaluateTests(unittest.TestCase):
 
 
 class SweepTests(unittest.TestCase):
-    def run_main(self, args, open_numbers, failing=()):
+    def run_main(self, args, rows, failing=()):
         evaluated = []
 
-        def fake_evaluate(number, *rest):
+        def fake_judge(number, *rest):
             evaluated.append(number)
             if number in failing:
                 raise status.GateError("gh pr view failed")
             return {"pr": number, "skipped": "not open"} if number == 7 else {"pr": number, "statuses": []}
 
-        with mock.patch.object(status, "evaluate", side_effect=fake_evaluate), \
-             mock.patch.object(status, "open_pulls", return_value=open_numbers), \
+        with mock.patch.object(status, "judge", side_effect=fake_judge), \
+             mock.patch.object(status, "open_rows", return_value=[row(n) for n in rows]), \
              mock.patch.object(status, "production_failures", return_value=[]), \
              mock.patch.dict(os.environ, {"SHERIFF_DEFAULT_BRANCH": "main"}), \
              mock.patch("builtins.print"):
@@ -191,6 +191,78 @@ class SweepTests(unittest.TestCase):
 
     def test_one_failing_pull_request_does_not_stop_the_others(self):
         self.assertEqual(self.run_main(["--pr", "8", "--pr", "9"], [], failing=(8,)), (1, [8, 9]))
+
+
+def row(number, armed=False, base="main"):
+    return {"number": number, "baseRefName": base, "autoMergeRequest": {"mergeMethod": "SQUASH"} if armed else None}
+
+
+class SerialMergeTests(unittest.TestCase):
+    def run_main(self, args, rows, blocked=()):
+        posted, judged = {}, []
+
+        def fake_gh_json(args):
+            if args[0] == "pr" and args[1] == "view":
+                number = int(args[2])
+                return {"state": "OPEN", "headRefOid": str(number % 10) * 40, "baseRefName": "main"}
+            return []
+
+        def fake_pages(path):
+            if "/pulls/" in path and path.endswith("/reviews"):
+                judged.append(int(path.split("/pulls/")[1].split("/")[0]))
+            if any("/issues/%d/" % n in path for n in blocked):
+                return [comment("owner", "Why?", "2026-11-21T10:00:00Z")]
+            return []
+
+        def fake_gh(args):
+            if args[:2] == ["api", "-X"]:
+                fields = dict(item.split("=", 1) for item in args if "=" in item and not item.startswith("repos/"))
+                posted[args[3].split("/")[-1]] = (fields["state"], fields["description"])
+            return ""
+
+        with mock.patch.object(status, "gh_json", side_effect=fake_gh_json), \
+             mock.patch.object(status, "gh_pages", side_effect=fake_pages), \
+             mock.patch.object(status, "gh", side_effect=fake_gh), \
+             mock.patch.object(status, "open_rows", return_value=rows), \
+             mock.patch.object(status, "current_statuses", return_value={}), \
+             mock.patch.object(status, "production_failures", return_value=[]), \
+             mock.patch.dict(os.environ, {"SHERIFF_DEFAULT_BRANCH": "main"}), \
+             mock.patch("builtins.print"):
+            code = status.main(args)
+        return code, {int(sha[0]): value for sha, value in posted.items()}, judged
+
+    def test_only_the_lowest_armed_ready_pull_request_gets_success(self):
+        code, posted, _ = self.run_main([], [row(3, True), row(2, True), row(4, True)])
+        self.assertEqual(posted[2][0], "success")
+        self.assertEqual(posted[3], ("pending", "one merge per deploy: waiting for #2"))
+        self.assertEqual(posted[4], ("pending", "one merge per deploy: waiting for #2"))
+
+    def test_a_blocked_lowest_armed_pull_request_does_not_hold_the_next(self):
+        code, posted, _ = self.run_main([], [row(2, True), row(3, True), row(4, True)], blocked=(2,))
+        self.assertEqual(posted[2][0], "failure")
+        self.assertEqual(posted[3][0], "success")
+        self.assertEqual(posted[4], ("pending", "one merge per deploy: waiting for #3"))
+
+    def test_a_pull_request_without_auto_merge_is_unaffected(self):
+        code, posted, _ = self.run_main([], [row(2, True), row(3, False), row(4, True)])
+        self.assertEqual([posted[2][0], posted[3][0], posted[4][0]], ["success", "success", "pending"])
+
+    def test_single_mode_waits_for_a_lower_armed_ready_pull_request_without_posting_on_it(self):
+        code, posted, judged = self.run_main(["--pr", "4"], [row(2, True), row(4, True)])
+        self.assertEqual(posted, {4: ("pending", "one merge per deploy: waiting for #2")})
+        self.assertIn(2, judged)
+
+    def test_single_mode_leader_gets_success(self):
+        code, posted, judged = self.run_main(["--pr", "4"], [row(2, True), row(4, True)], blocked=(2,))
+        self.assertEqual(list(posted), [4])
+        self.assertEqual(posted[4][0], "success")
+        code, posted, judged = self.run_main(["--pr", "2"], [row(2, True), row(4, True)])
+        self.assertEqual(posted[2][0], "success")
+        self.assertEqual(judged, [2])
+
+    def test_disarming_the_leader_releases_the_next_armed_pull_request(self):
+        code, posted, _ = self.run_main(["--pr", "2"], [row(2, False), row(3, True), row(4, True)])
+        self.assertEqual([posted[2][0], posted[3][0], posted[4][0]], ["success", "success", "pending"])
 
 
 if __name__ == "__main__":
