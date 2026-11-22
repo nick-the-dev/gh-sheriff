@@ -26,6 +26,13 @@ def pr(state="OPEN", commit=None, merged_at=None, number=10):
     return {"number": number, "state": state, "merged_at": merged_at, "commit": commit}
 
 
+def mark(sha):
+    return work.VERIFIED_MARK.format(sha)
+
+
+MERGED = {"A": [pr("MERGED", C1, "2026-11-02")]}
+
+
 def derive(entry, prs, live=()):
     return work.derive(entry, prs, lambda commit: "evidence" if commit in live else "")
 
@@ -204,16 +211,21 @@ class ServedShaTest(unittest.TestCase):
 
 
 class SyncTest(unittest.TestCase):
-    def run_sync(self, items, prs, apply=True, only=None, moved=(), known=KNOWN, live=(C1,)):
-        calls = []
+    def run_sync(self, items, prs, apply=True, only=None, moved=(), known=KNOWN, live=(C1,), comments=None):
+        calls, bodies = [], comments or {}
+
+        def fake_gql(query, variables=None):
+            return {"nodes": [{"id": i["node"], "comments": {"nodes": [{"body": body} for body in bodies.get(i["id"], [])]}}
+                              for i in items if i["node"] in variables["ids"]]}
         patches = {
             "schema": lambda: known, "issues": lambda state="OPEN", pages=0: [i for i in items if i["open"] == (state == "OPEN")],
             "pull_requests": lambda pages=0, merged=True: (prs, "main"),
             "release_check": lambda branch: (lambda commit: "evidence for " + commit if commit in live else ""),
             "unchanged": lambda entry: entry["id"] not in moved,
             "set_fields": lambda known, entry, **values: calls.append(("set", entry["id"], values)),
-            "comment": lambda entry, body: calls.append(("comment", entry["id"], body)),
+            "comment": lambda entry, body, mark=work.AGENT_MARK: calls.append(("comment", entry["id"], body + "\n\n" + mark)),
             "close": lambda entry, reason="COMPLETED": calls.append(("close", entry["id"])),
+            "reopen": lambda entry: calls.append(("reopen", entry["id"])), "gql": fake_gql,
         }
         with mock.patch.multiple(work, **patches):
             return work.sync(apply, only), calls
@@ -222,6 +234,7 @@ class SyncTest(unittest.TestCase):
         result, calls = self.run_sync([item(stage="Merged", verify="Release only")], {"A": [pr("MERGED", C1, "2026-11-02")]})
         self.assertEqual([call[:2] for call in calls], [("comment", "A"), ("set", "A"), ("close", "A")])
         self.assertIn("evidence for " + C1, calls[0][2])
+        self.assertTrue(calls[0][2].endswith("\n\n" + mark(C1)))
         self.assertEqual(calls[1][2], {"stage": "Verified"})
 
     def test_issue_closed_at_merge_still_moves_but_is_not_closed_again(self):
@@ -258,6 +271,58 @@ class SyncTest(unittest.TestCase):
         result, calls = self.run_sync([item(None)], {"A": [pr()]})
         self.assertEqual(calls, [])
 
+    def test_verified_with_evidence_for_the_latest_merge_stays(self):
+        evidence = {"A": ["## Verified in production\n\nchecked\r\n\r\n" + mark(C1) + " \r\n", "thanks"]}
+        result, calls = self.run_sync([item(stage="Verified", is_open=False, reason="COMPLETED")], MERGED, comments=evidence)
+        self.assertEqual((result["changes"], calls, work.sync_text(result)), ([], [], ""))
+
+    def test_verified_without_evidence_moves_back_to_released_with_one_comment(self):
+        result, calls = self.run_sync([item(stage="Verified")], MERGED, comments={"A": ["looks good"]})
+        self.assertEqual([call[:2] for call in calls], [("comment", "A"), ("set", "A")])
+        self.assertIn("set back to Released.", calls[0][2])
+        self.assertIn("`gh sheriff task verify A --evidence-file <file>`", calls[0][2])
+        self.assertTrue(calls[0][2].endswith(work.AGENT_MARK))
+        self.assertEqual(calls[1][2], {"stage": "Released"})
+        self.assertEqual(work.sync_text(result), "#1 A: Verified -> Released (Verified without recorded evidence)")
+
+    def test_evidence_for_an_older_merge_does_not_count(self):
+        prs = {"A": [pr("MERGED", C1, "2026-11-02"), pr("MERGED", C2, "2026-11-06", 11)]}
+        for live, stage in (((C1, C2), "Released"), ((C1,), "Merged")):
+            with self.subTest(stage=stage):
+                result, calls = self.run_sync([item(stage="Verified")], prs, live=live, comments={"A": ["checked\n\n" + mark(C1)]})
+                self.assertEqual((result["changes"][0]["to"], calls[1][2]), (stage, {"stage": stage}))
+
+    def test_a_marker_that_is_not_the_last_line_or_names_another_sha_does_not_count(self):
+        bodies = [mark(C1) + "\nedited below", "checked\n\n" + mark(C2), "checked\n\n<!-- sheriff-verified sha=" + C1[:7] + " -->"]
+        result, _ = self.run_sync([item(stage="Verified")], MERGED, comments={"A": bodies})
+        self.assertEqual(result["changes"][0]["to"], "Released")
+
+    def test_a_verified_issue_closed_as_completed_is_reopened(self):
+        result, calls = self.run_sync([item(stage="Verified", is_open=False, reason="COMPLETED")], MERGED)
+        self.assertEqual([call[:2] for call in calls], [("comment", "A"), ("set", "A"), ("reopen", "A")])
+        self.assertIn("set back to Released and the issue reopened.", calls[0][2])
+
+    def test_a_second_sync_after_a_revert_does_nothing(self):
+        first, calls = self.run_sync([item(stage="Verified")], MERGED)
+        notes = {"A": [call[2] for call in calls if call[0] == "comment"]}
+        second, again = self.run_sync([item(stage=first["changes"][0]["to"])], MERGED, comments=notes)
+        self.assertEqual((second["changes"], again, work.sync_text(second)), ([], [], ""))
+
+    def test_a_revert_without_apply_is_only_reported(self):
+        result, calls = self.run_sync([item(stage="Verified", is_open=False, reason="COMPLETED")], MERGED, apply=False)
+        self.assertEqual(calls, [])
+        self.assertEqual(work.sync_text(result), "would move #1 A: Verified -> Released (Verified without recorded evidence)")
+
+    def test_a_revert_goes_no_higher_than_the_facts(self):
+        for prs, stage, verify in ((MERGED, "Released", "Release only"), ({"A": [pr()]}, "In progress", "Live check"), ({}, "Candidate", "Live check")):
+            with self.subTest(stage=stage):
+                self.assertEqual(self.run_sync([item(stage="Verified", verify=verify)], prs)[0]["changes"][0]["to"], stage)
+
+    def test_decisions_stay_and_a_marker_counts_when_no_merge_is_in_view(self):
+        items = [item("A", 1, "Verified", decision=True), item("B", 2, "Verified")]
+        result, calls = self.run_sync(items, {}, comments={"B": ["checked\n\n" + mark(C2)]})
+        self.assertEqual((result["changes"], calls), ([], []))
+
     def test_a_run_low_on_rate_limit_waits_for_a_later_one(self):
         result, calls = self.run_sync([item(stage="Merged")], {"A": [pr("MERGED", C1, "2026-11-02")]}, known=dict(KNOWN, remaining=work.RESERVE - 1))
         self.assertEqual((calls, result["changes"]), ([], []))
@@ -267,6 +332,24 @@ class SyncTest(unittest.TestCase):
         result, calls = self.run_sync([item()], {"A": [pr()]}, known=dict(KNOWN, missing=["Stage"]))
         self.assertEqual((calls, result["changes"]), ([], []))
         self.assertIn("gh sheriff install", work.sync_text(result))
+
+
+class EvidenceTest(unittest.TestCase):
+    def test_markers_are_read_from_each_issues_comments_in_batches_of_100(self):
+        seen = []
+
+        def fake(query, variables=None):
+            seen.append(len(variables["ids"]))
+            return {"nodes": [{"id": node, "comments": {"nodes": [{"body": "x\n" + mark(C1)}, {"body": None}, None]}} for node in variables["ids"]] + [None]}
+        with mock.patch.object(work, "gql", fake):
+            found = work.recorded([item(number=number) for number in range(150)])
+        self.assertEqual((seen, found["N7"], len(found)), ([100, 50], {C1}, 150))
+
+    def test_only_a_full_sha_on_the_last_line_is_a_marker(self):
+        self.assertEqual(work.marked_sha("evidence\r\n\r\n" + mark(C2) + "\r\n"), C2)
+        for body in ("", None, mark(C2) + "\nmore", "<!-- sheriff-verified sha=abc -->", "see " + mark(C2)):
+            with self.subTest(body=body):
+                self.assertIsNone(work.marked_sha(body))
 
 
 class FieldInputTest(unittest.TestCase):
@@ -374,15 +457,16 @@ class MakeIdTest(unittest.TestCase):
 
 
 class CommandTest(unittest.TestCase):
-    def call(self, argv, entry=None, open_prs=None, known=KNOWN, open_items=(), closed=()):
+    def call(self, argv, entry=None, prs=None, known=KNOWN, open_items=(), closed=(), live=(C1,)):
         calls = []
         patches = {
             "use_repo": lambda explicit=None: "o/r", "schema": lambda: known,
             "lookup": lambda task: entry, "issues": lambda state="OPEN", pages=0: list(open_items),
             "closed_matches": lambda task: [c for c in closed if c["id"] == task],
-            "pull_requests": lambda pages=0, merged=True: (open_prs or {}, "main"),
+            "pull_requests": lambda pages=0, merged=True: (prs or {}, "main"),
+            "release_check": lambda branch: (lambda commit: "released" if commit in live else ""),
             "set_fields": lambda known, e, **values: calls.append(("set", values)),
-            "comment": lambda e, body: calls.append(("comment", body)),
+            "comment": lambda e, body, mark=work.AGENT_MARK: calls.append(("comment", body + "\n\n" + mark)),
             "close": lambda e, reason="COMPLETED": calls.append(("close", reason)),
             "label_id": lambda name: calls.append(("label", name)) or "L1",
             "gql": lambda query, variables=None: calls.append(("gql", variables)) or {"createIssue": {"issue": {"id": "I9", "number": 9, "url": "u9"}}},
@@ -413,15 +497,24 @@ class CommandTest(unittest.TestCase):
         self.assertEqual(self.call(["verify", "A", "--evidence-file", "long"], item(stage="Merged"))[:2], (1, []))
         self.assertEqual(self.call(["verify", "A", "--evidence-file", "short"], item(stage="Released"))[:2], (1, []))
 
-    def test_verify_records_the_evidence_sets_verified_and_closes(self):
-        code, calls, _ = self.call(["verify", "A", "--evidence-file", "long"], item(stage="Released"))
+    def test_verify_records_the_evidence_with_the_latest_merge_sets_verified_and_closes(self):
+        prs = {"A": [pr("MERGED", C2, "2026-11-06", 11), pr("MERGED", C1, "2026-11-02")]}
+        code, calls, _ = self.call(["verify", "A", "--evidence-file", "long"], item(stage="Released"), prs, live=(C1, C2))
         self.assertEqual(code, 0)
         self.assertEqual(calls[0][0], "comment")
         self.assertIn("x" * 50, calls[0][1])
+        self.assertTrue(calls[0][1].endswith("\n\n" + mark(C2)))
         self.assertEqual(calls[1:], [("set", {"stage": "Verified", "next_action": ""}), ("close", "COMPLETED")])
 
+    def test_verify_refuses_without_a_released_merge(self):
+        for prs, live in ((None, (C1,)), ({"A": [pr()]}, (C1,)), (MERGED, ()), ({"A": [pr("MERGED", None, "2026-11-02")]}, (None,))):
+            with self.subTest(prs=prs, live=live):
+                code, calls, out = self.call(["verify", "A", "--evidence-file", "long"], item(stage="Released"), prs, live=live)
+                self.assertEqual((code, calls), (1, []))
+                self.assertIn("released", json.loads(out)["error"])
+
     def test_verify_does_not_reclose_an_issue_closed_at_merge(self):
-        code, calls, _ = self.call(["verify", "A", "--evidence-file", "long"], item(stage="Released", is_open=False, reason="COMPLETED"))
+        code, calls, _ = self.call(["verify", "A", "--evidence-file", "long"], item(stage="Released", is_open=False, reason="COMPLETED"), MERGED)
         self.assertEqual([call[0] for call in calls], ["comment", "set"])
 
     def test_reply_comments_with_the_agent_marker(self):

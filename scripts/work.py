@@ -22,6 +22,8 @@ ISSUE_TITLE_RE = re.compile(r"^(" + ID + r"): ")
 PR_TITLE_RE = re.compile(r"\((" + ID + r")\)$")
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 AGENT_MARK = "<!-- sheriff-ack -->"
+VERIFIED_MARK = "<!-- sheriff-verified sha={} -->"
+VERIFIED_RE = re.compile(r"<!-- sheriff-verified sha=([0-9a-f]{40}) -->")
 DECISION_LABEL = "decision"
 STOP_WORDS = frozenset("a an and as at be by for from in into is it of on or the to with".split())
 PAGES = 2
@@ -288,7 +290,7 @@ def release_check(branch):
 
 
 def latest_merge(item, prs):
-    counted = item["stage"] in ("Merged", "Released")
+    counted = item["stage"] in ("Merged", "Released", "Verified")
     merged = [pr for pr in prs if pr["state"] == "MERGED" and (counted or (pr["merged_at"] or "") >= item["created"])]
     return max(merged, key=lambda pr: pr["merged_at"] or "") if merged else None
 
@@ -308,9 +310,40 @@ def derive(item, prs, released):
     return target if FORWARD.index(target) > rank else None
 
 
+EVIDENCE_QUERY = "query($ids:[ID!]!){nodes(ids:$ids){... on Issue{id comments(last:100){nodes{body}}}}}"
+
+
+def marked_sha(body):
+    lines = (body or "").strip().splitlines()
+    match = VERIFIED_RE.fullmatch(lines[-1].strip()) if lines else None
+    return match.group(1) if match else None
+
+
+def recorded(items):
+    found = {}
+    for start in range(0, len(items), 100):
+        for node in filter(None, gql(EVIDENCE_QUERY, {"ids": [item["node"] for item in items[start:start + 100]]})["nodes"]):
+            found[node["id"]] = {marked_sha((entry or {}).get("body")) for entry in (node.get("comments") or {}).get("nodes") or []} - {None}
+    return found
+
+
+def unproven(item, prs, released, shas):
+    if item["decision"] or item["stage"] != "Verified":
+        return None
+    merge = latest_merge(item, prs)
+    if shas and (not merge or merge["commit"] in shas):
+        return None
+    if merge:
+        return "Released" if merge["commit"] and released(merge["commit"]) else "Merged"
+    return "In progress" if any(pr["state"] == "OPEN" for pr in prs) else "Candidate"
+
+
+REVERT_NOTE = ("Stage was Verified without valid recorded evidence, so it was set back to {stage}{reopened}. Verified needs evidence recorded with "
+               "`gh sheriff task verify {task} --evidence-file <file>`, or by the automatic release verification for \"Release only\" work.")
 SET_MUTATION = "mutation($issue:ID!,$fields:[IssueFieldCreateOrUpdateInput!]!){setIssueFieldValue(input:{issueId:$issue,issueFields:$fields}){issue{number}}}"
 COMMENT_MUTATION = "mutation($id:ID!,$body:String!){addComment(input:{subjectId:$id,body:$body}){clientMutationId}}"
 CLOSE_MUTATION = "mutation($id:ID!,$reason:IssueClosedStateReason){closeIssue(input:{issueId:$id,stateReason:$reason}){clientMutationId}}"
+REOPEN_MUTATION = "mutation($id:ID!){reopenIssue(input:{issueId:$id}){clientMutationId}}"
 CREATE_MUTATION = "mutation($input:CreateIssueInput!){createIssue(input:$input){issue{id number url}}}"
 LABEL_QUERY = "query($owner:String!,$name:String!,$label:String!){repository(owner:$owner,name:$name){label(name:$label){id}}}"
 
@@ -340,12 +373,16 @@ def set_fields(known, item, **values):
         gql(SET_MUTATION, {"issue": item["node"], "fields": inputs})
 
 
-def comment(item, body):
-    gql(COMMENT_MUTATION, {"id": item["node"], "body": body + "\n\n" + AGENT_MARK})
+def comment(item, body, mark=AGENT_MARK):
+    gql(COMMENT_MUTATION, {"id": item["node"], "body": body + "\n\n" + mark})
 
 
 def close(item, reason="COMPLETED"):
     gql(CLOSE_MUTATION, {"id": item["node"], "reason": reason})
+
+
+def reopen(item):
+    gql(REOPEN_MUTATION, {"id": item["node"]})
 
 
 def unchanged(item):
@@ -364,22 +401,30 @@ def sync(apply, only=None, pages=PAGES):
              if item["id"] and (item["open"] or (item["reason"] == "COMPLETED" and item["stage"])) and (not only or item["id"] == only)]
     prs, branch = pull_requests(pages)
     released = release_check(branch)
+    proofs = recorded([item for item in items if item["stage"] == "Verified" and not item["decision"]])
     changes = []
     for item in items:
         found = prs.get(item["id"], [])
-        target = derive(item, found, released)
+        back = unproven(item, found, released, proofs.get(item["node"]))
+        target = back or derive(item, found, released)
         if not target:
             continue
-        changes.append({"id": item["id"], "number": item["number"], "from": item["stage"], "to": target})
+        changes.append(dict({"id": item["id"], "number": item["number"], "from": item["stage"], "to": target},
+                            **({"why": "Verified without recorded evidence"} if back else {})))
         if not apply:
             continue
         if not unchanged(item):
             changes[-1]["skipped"] = "changed since it was read"
             continue
+        if back:
+            comment(item, REVERT_NOTE.format(stage=target, task=item["id"], reopened="" if item["open"] else " and the issue reopened"))
         if target == "Verified":
-            comment(item, "Verified by release: " + released(latest_merge(item, found)["commit"]) +
-                    ". Verify by is \"Release only\", so no live check is owed.")
+            commit = latest_merge(item, found)["commit"]
+            comment(item, "Verified by release: " + released(commit) + ". Verify by is \"Release only\", so no live check is owed.",
+                    VERIFIED_MARK.format(commit))
         set_fields(known, item, stage=target)
+        if back and not item["open"]:
+            reopen(item)
         if target == "Verified" and item["open"]:
             close(item)
     return {"changes": changes, "applied": bool(apply)}
@@ -389,7 +434,7 @@ def sync_text(result):
     if result.get("skipped"):
         return result["skipped"]
     return "\n".join(("" if result["applied"] else "would move ") + "#" + str(change["number"]) + " " + change["id"] + ": " +
-                     str(change["from"] or "no stage") + " -> " + change["to"] + (" (skipped: " + change["skipped"] + ")" if change.get("skipped") else "")
+                     str(change["from"] or "no stage") + " -> " + change["to"] + (" (" + change["why"] + ")" if change.get("why") else "") + (" (skipped: " + change["skipped"] + ")" if change.get("skipped") else "")
                      for change in result["changes"])
 
 
@@ -526,7 +571,11 @@ def run(args):
         evidence = read_text(args.evidence_file).strip()
         if len(evidence) < EVIDENCE_MIN:
             raise WorkError("the evidence must say what was exercised in production and what was observed")
-        comment(item, "## Verified in production\n\n" + evidence)
+        prs, branch = pull_requests()
+        merge = latest_merge(item, prs.get(item["id"], []))
+        if not (merge and merge["commit"] and release_check(branch)(merge["commit"])):
+            raise WorkError("#" + str(item["number"]) + " has no merge into the default branch known to be released, so there is no released commit to verify")
+        comment(item, "## Verified in production\n\n" + evidence, VERIFIED_MARK.format(merge["commit"]))
         set_fields(known, item, stage="Verified", next_action="")
         if item["open"]:
             close(item)
@@ -549,7 +598,7 @@ def add_commands(parser):
     change.add_argument("--stage", choices=STAGES)
     change.add_argument("--next", help="one line: who acts next and what ('' clears it)")
     change.add_argument("--verify", choices=VERIFY)
-    verify = sub.add_parser("verify", parents=[common], help="record production evidence, set Verified and close the issue")
+    verify = sub.add_parser("verify", parents=[common], help="record production evidence for the released merge, set Verified and close the issue")
     verify.add_argument("task", help="task id or #issue number")
     verify.add_argument("--evidence-file", required=True, help="what was exercised in production and what was observed; - reads standard input")
     status = sub.add_parser("status", parents=[common], help="open work by stage, and issues where a person commented last")

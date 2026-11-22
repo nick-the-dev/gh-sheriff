@@ -78,7 +78,7 @@ flowchart TD
 6. **Released.** Sheriff sees that production serves the merged commit and moves the task to Released.
 7. **Verified.** An agent (or a person) exercises the change in production and records what it saw with
    `gh sheriff task verify`. The task becomes Verified and its issue closes. Work marked "Release only" needs no live
-   check and is verified as soon as it is released.
+   check and is verified as soon as it is released. A Verified set by hand, without that record, is moved back.
 
 Each review round is counted before the AI starts. Cancelling or re-running a review never buys an extra attempt.
 
@@ -159,7 +159,7 @@ gh sheriff stats                           # how much the smart model did, and w
 | `gh sheriff stats` | Review usage on recent pull requests: share of tokens by the final model, cost, and a warning above `--limit` |
 | `gh sheriff task new "<title>"` | Open a task issue at Candidate, already on the board |
 | `gh sheriff task set <ID\|#n>` | Set what facts can't show: `--stage Parked`, `--next "who acts next"`, `--verify` |
-| `gh sheriff task verify <ID\|#n> --evidence-file F` | Record production evidence, set Verified and close the issue |
+| `gh sheriff task verify <ID\|#n> --evidence-file F` | Record production evidence for the released merge, set Verified and close the issue. Refuses work that is not Released |
 | `gh sheriff task status` | Open work by stage, blocked work, decisions, and issues where a person spoke last |
 | `gh sheriff task reply <ID\|#n> --body-file F` | Answer a person on an issue |
 | `gh sheriff task sync [--apply]` | What CI runs to move stages; without `--apply` it only reports |
@@ -226,11 +226,15 @@ names its task by ending its title with `(LOGIN-FIX)`, or with a branch whose la
 | An open pull request from this repository names the task | In progress |
 | Its latest merge into the default branch | Merged |
 | Production serves a commit containing the merge (or the deploy run succeeded, or, with neither configured, the merge itself) | Released |
-| Released, and `Verify by` is Release only | Verified, with a comment; the issue closes |
+| Released, and `Verify by` is Release only | Verified, with an evidence comment; the issue closes |
 
 How stages behave:
 
-- Stages never move backwards on their own.
+- Only Sheriff marks Verified: a hand-set Verified without recorded evidence is moved back on the next sync.
+  Evidence is a comment whose last line is `<!-- sheriff-verified sha=… -->`, naming the task's latest merge.
+  `task verify` and the automatic release verification write it. Moved back, the stage follows the facts (at most
+  Released), a closed issue reopens, and one comment says why.
+- Otherwise stages never move backwards on their own.
 - Decisions never move.
 - Pull requests from forks never mark work In progress.
 - Every run is idempotent.
