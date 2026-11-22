@@ -1,36 +1,34 @@
 # Sheriff
 
-**Agents code. The Sheriff decides what merges.**
+A GitHub CLI extension that reviews every pull request with AI in CI, and only lets it merge when the review passes.
 
 [![CI](https://github.com/nick-the-dev/gh-sheriff/actions/workflows/ci.yml/badge.svg)](https://github.com/nick-the-dev/gh-sheriff/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![gh extension](https://img.shields.io/badge/gh-extension-black?logo=github)](https://cli.github.com/manual/gh_extension)
 
-Sheriff is a GitHub CLI extension for repositories where AI agents open pull requests. Every push gets an independent
-AI review in CI, cheap model first. GitHub itself refuses to merge anything that review hasn't passed, and admins
-can't bypass it. Each piece of work is a **GitHub issue** on a **GitHub Projects** board. Sheriff moves its stage
-as the work progresses: In progress, Merged, then Released once production runs it. Verified requires evidence from a
-live check.
+Sheriff is for repositories where AI agents open pull requests. One command sets up:
 
-Sheriff is built only from GitHub features: Actions, a GitHub App, rulesets, check runs, Issues and Projects. It
-works the same whatever runs your agents: Claude Code, Codex, LobeHub, a bot or a person.
+- an AI review on every push. A cheap model goes first, and Claude Opus reviews only if that passes;
+- a ruleset that blocks merging until the review passes. Admins can't bypass it either;
+- task tracking with GitHub Issues and a GitHub Projects board. Each task's status follows its pull request and your
+  deploys.
+
+It is built entirely on GitHub: Actions, a GitHub App, rulesets, Issues and Projects. So it works with any agent tool,
+such as Claude Code, Codex or LobeHub, and with people too.
 
 ```sh
 gh extension install nick-the-dev/gh-sheriff
+cd your-repo
 gh sheriff install
 ```
 
-**Why:** agents write code faster than anyone can read it. They review their own work, "LGTM" comments don't stop a
-merge, agents hold admin logins that skip every rule, and running the best model on every change burns the budget.
-Sheriff moves the rules into GitHub, where agents can't argue with them.
-
-## How it works
+## How a pull request gets merged
 
 ```mermaid
 flowchart TB
     subgraph REVIEW["Review every push"]
         direction LR
-        A["Agent pushes"] --> B["Cheap AI review"] -->|clean| C["Smart AI review"]
+        A["Agent pushes"] --> B["Cheap AI review"] -->|clean| C["Opus review"]
         B -->|problem| X["Agent fixes it"]
         C -->|problem| X
         X --> A
@@ -42,96 +40,100 @@ flowchart TB
     REVIEW -->|clean| SHIP
 ```
 
-**Review**
-- **Cheap review.** A low-cost model reviews every new push. Docs-only changes stop here.
-- **Smart review.** Only a clean cheap review reaches the smart model, Claude Opus by default.
-- **Round budget.** Each pull request gets 3 cheap and 3 smart rounds, then a maintainer decides. Every round is
-  counted before the AI starts, so cancelling or re-running never buys another try.
+1. An agent pushes to a pull request.
+2. A cheap model reviews the diff. If it finds a problem, the `Review` check fails and the agent pushes a fix. Changes
+   that only touch docs stop here.
+3. If the cheap review is clean, Claude Opus reviews the same diff.
+4. The `Merge gate` check passes when two things hold:
+   - every comment from a person has an agent reply;
+   - production is healthy, if you configured a health check.
+5. When `Review` and `Merge gate` are both green, GitHub merges the pull request automatically.
+6. Your deploy workflow runs. When production serves the merged commit, Sheriff marks the task Released.
+7. Someone checks the change in production and records it with `gh sheriff task verify`. The task becomes Verified.
 
-**Ship**
-- **Merge gate.** Every comment from a person needs an agent's answer. Production must be healthy, if you configured
-  it.
-- **GitHub merges.** It merges the moment `Review` and `Merge gate` are green. Nobody can bypass that, admins
-  included.
-- **Deploy.** Your own deploy runs and tells Sheriff when it's done.
-- **Released.** Sheriff sees production serving the merge and moves the task's issue to Released.
-- **Verified.** An agent checks the change live and records evidence with `gh sheriff task verify`. Only Sheriff can
-  set Verified.
+Each pull request gets 3 cheap and 3 Opus reviews. After that, a maintainer has to comment `/sheriff review` to allow
+one more. A review counts as soon as it starts, so cancelling or re-running it doesn't give a free retry.
 
-## Quick start
+## Requirements
 
-You need:
-- admin rights on the repository;
-- the [GitHub CLI](https://cli.github.com), logged in;
-- Python 3.9 or newer;
-- a [supported subscription](#supported-reviewers).
+- Admin rights on the repository.
+- [GitHub CLI](https://cli.github.com), logged in.
+- Python 3.9 or newer.
+- A Claude subscription, and optionally OpenCode Go (see [Reviewers](#reviewers)).
+
+## Install
 
 ```sh
 gh extension install nick-the-dev/gh-sheriff
-cd your-repo && gh sheriff install
-gh sheriff doctor
+gh sheriff install --repo owner/name
+gh sheriff doctor --repo owner/name
 ```
 
-`install` is safe to re-run, and works for organisations and personal accounts. It:
-1. creates two environments, limited to the default branch: `sheriff` for the gate App, `sheriff-review` for the
-   reviewer keys;
-2. creates your gate App in one browser click;
-3. asks which reviewers to use and stores their keys;
-4. opens a pull request with two trigger files, which Sheriff reviews and auto-merges;
-5. turns on auto-merge and creates the no-bypass `Sheriff` ruleset, keeping your existing required checks;
-6. sets up work state:
-   - three issue fields on your account;
-   - a GitHub Projects board named `<repo> work`, with views and Auto-add.
+`install` works for organisations and personal accounts. You can run it again safely: it only adds what is missing.
+It does the following:
 
-## Supported reviewers
+1. Creates two environments that only the default branch can use: `sheriff` for the GitHub App key, and
+   `sheriff-review` for the reviewer keys.
+2. Creates a GitHub App for your account (one click in the browser). Only this App can post the `Review` and
+   `Merge gate` results.
+3. Asks which reviewers to use and stores their keys.
+4. Opens a pull request that adds `.github/workflows/sheriff.yml` and `sheriff-relay.yml`. Sheriff reviews that pull
+   request, and it merges itself.
+5. Turns on auto-merge and creates a ruleset named `Sheriff` that requires `Review` and `Merge gate`. Required checks
+   you already have are kept.
+6. Adds three issue fields to your account and creates a GitHub Projects board named `<repo> work`. Skip this with
+   `--no-work-state`.
 
-Reviews run on subscriptions you already pay for, with no per-token API billing.
+## Reviewers
 
-| Subscription | Typical role | Reviewer value | Key |
+Reviews run on subscriptions, not on pay-per-token API keys.
+
+| Subscription | Use it for | Model setting | Key |
 |---|---|---|---|
-| **Claude**, any plan with Claude Code | Smart review (or a cheap one with a small model) | `claude:claude-opus-5-5`, `claude:claude-haiku-5-5` | `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token` |
-| **[OpenCode Go](https://opencode.ai)** | Cheap review | `opencode:opencode-go/deepseek-v4.1-flash`, or any `opencode-go/` model | `OPENCODE_API_KEY` |
+| Claude (any plan that includes Claude Code) | The Opus review, or a cheap review with a small model | `claude:claude-opus-5-5`, `claude:claude-haiku-5-5` | `CLAUDE_CODE_OAUTH_TOKEN`, from `claude setup-token` |
+| [OpenCode Go](https://opencode.ai) | The cheap review | `opencode:opencode-go/deepseek-v4.1-flash`, or any `opencode-go/` model | `OPENCODE_API_KEY` |
 
 Not supported yet:
 - Anthropic API keys;
 - OpenAI or Codex;
 - OpenCode models outside Go.
 
-Switch reviewers with `gh sheriff models`. `gh sheriff stats` shows the smart model's share of the work and its cost;
-the target is under 10%.
+Run `gh sheriff models` to change reviewers. `gh sheriff stats` shows how much of the review work Opus did and what it
+cost; aim for under 10%.
 
 ## Commands
 
-| Command | What it does |
+| Command | Description |
 |---|---|
-| `gh sheriff install` | Set up a repository (`--repo`, `--first-pass`, `--review-model`, `--no-work-state`, `--project-name`, `--no-files`, `--yes`) |
-| `gh sheriff doctor` | Check the setup and say what to fix |
-| `gh sheriff models` | Choose the cheap and the smart reviewer |
-| `gh sheriff stats` | Review usage and cost on recent pull requests |
-| `gh sheriff task new "<title>"` | Open a task issue, already on the board |
-| `gh sheriff task set <ID>` | Set what facts can't show: `--stage Parked`, `--next "…"`, `--verify` |
-| `gh sheriff task verify <ID> --evidence-file F` | Record production evidence for released work; sets Verified and closes the issue |
-| `gh sheriff task status` | Open work by stage, blocked work, and issues waiting on an agent |
-| `gh sheriff task reply <ID> --body-file F` | Answer a person on an issue |
+| `gh sheriff install` | Set up a repository. Flags: `--repo`, `--first-pass`, `--review-model`, `--no-work-state`, `--project-name`, `--no-files`, `--yes` |
+| `gh sheriff doctor` | Check the setup and print what to fix |
+| `gh sheriff models` | Choose the cheap and the Opus reviewer |
+| `gh sheriff stats` | Show review usage and cost for recent pull requests |
+| `gh sheriff task new "<title>"` | Create a task issue and add it to the board |
+| `gh sheriff task set <ID>` | Set fields Sheriff can't infer: `--stage Parked`, `--next "..."`, `--verify` |
+| `gh sheriff task verify <ID> --evidence-file F` | Record what was checked in production. Sets Verified and closes the issue |
+| `gh sheriff task status` | List open tasks by stage, blocked tasks, and comments waiting for a reply |
+| `gh sheriff task reply <ID> --body-file F` | Reply to a person's comment on an issue |
 
 ## Configuration
 
-Repository variables, all optional:
+All settings are repository variables. All are optional.
 
-| Variable | Default | Meaning |
+| Variable | Default | Description |
 |---|---|---|
-| `SHERIFF_FIRST_PASS` / `SHERIFF_REVIEW_MODEL` | none / `claude:claude-opus-5-5` | Cheap and smart reviewer |
-| `SHERIFF_FIRST_PASS_ROUNDS` / `SHERIFF_REVIEW_ROUNDS` | `3` / `3` | Round budget per pull request |
-| `SHERIFF_VERSION_URL` | none | JSON with the deployed `sha`; `Merge gate` and Released wait for it |
-| `SHERIFF_HEALTH_URL` | none | Must answer 200 for `Merge gate` |
-| `SHERIFF_DEPLOY_WORKFLOW` | none | Deploy workflow file whose last run must have succeeded |
-| `SHERIFF_OVERRIDE` | none | One PR number that skips the production checks (break-glass) |
-| `SHERIFF_ACK_AUTHORS` | none | Logins, besides bots, whose replies answer a person's comment |
-| `SHERIFF_UNLOCK_AUTHORS` | none | Logins, besides admins and maintainers, whose `/sheriff review` allows one more smart round |
+| `SHERIFF_FIRST_PASS` | none | Cheap reviewer, e.g. `opencode:opencode-go/deepseek-v4.1-flash` |
+| `SHERIFF_REVIEW_MODEL` | `claude:claude-opus-5-5` | Final reviewer |
+| `SHERIFF_FIRST_PASS_ROUNDS`, `SHERIFF_REVIEW_ROUNDS` | `3`, `3` | Reviews allowed per pull request |
+| `SHERIFF_VERSION_URL` | none | A URL returning JSON with the deployed commit as `sha`. Used for `Merge gate` and Released |
+| `SHERIFF_HEALTH_URL` | none | `Merge gate` fails unless this URL returns 200 |
+| `SHERIFF_DEPLOY_WORKFLOW` | none | Deploy workflow file. `Merge gate` fails if its last run failed |
+| `SHERIFF_OVERRIDE` | none | A pull request number that may merge despite failing production checks |
+| `SHERIFF_ACK_AUTHORS` | none | Logins, other than bots, that count as agents when replying to comments |
+| `SHERIFF_UNLOCK_AUTHORS` | none | Logins, other than admins and maintainers, allowed to grant an extra review with `/sheriff review` |
 
 `install` also sets `SHERIFF_APP_ID`, `SHERIFF_APP_SLUG` and `SHERIFF_WORK_STATE`.
 
-End your deploy workflow with the step below. Its job needs `actions: write`.
+Add this step at the end of your deploy workflow so Sheriff knows a deploy finished. The job needs `actions: write`.
 
 ```yaml
 - run: gh workflow run sheriff.yml --ref main -f after_run="$GITHUB_RUN_ID"
@@ -139,73 +141,90 @@ End your deploy workflow with the step below. Its job needs `actions: write`.
     GH_TOKEN: ${{ github.token }}
 ```
 
-When a person comments, an agent answers with a reply whose last line is `<!-- sheriff-ack -->`. The reply must come
-from a bot or from a login in `SHERIFF_ACK_AUTHORS`.
+A comment from a person blocks `Merge gate` until an agent replies. The reply must come from a bot, or from a login
+in `SHERIFF_ACK_AUTHORS`, and its last line must be `<!-- sheriff-ack -->`.
 
-## Work state: GitHub Issues and Projects
+## Tracking work with Issues and Projects
 
-Each task is a GitHub issue titled like `LOGIN-FIX: fix the login page`. A pull request names its task by ending its
-title with `(LOGIN-FIX)`, or with a branch like `ai/LOGIN-FIX`. The state lives in three GitHub issue fields, shown
-as columns on the repository's GitHub Projects board:
+Each task is a GitHub issue whose title starts with an ID, like `LOGIN-FIX: fix the login page`. A pull request
+belongs to the task when its title ends with `(LOGIN-FIX)` or its branch is named like `ai/LOGIN-FIX`.
 
-| Issue field | Values |
+Sheriff stores the task state in three issue fields, which also appear as columns on the board:
+
+| Field | Values |
 |---|---|
-| `Stage` | Candidate → In progress → Merged → Released → Verified, or Parked |
+| `Stage` | Candidate, In progress, Merged, Released, Verified, Parked |
 | `Verify by` | Release only, Live check, Awaits event |
-| `Next action` | Who acts next, and what |
+| `Next action` | Free text: who does what next |
 
-Sheriff moves `Stage` from facts:
-- **In progress** when an open pull request names the task;
-- **Merged** when that pull request merges;
-- **Released** when production serves the merge or the deploy succeeds. With neither configured, merging counts as
-  releasing.
-- **Verified** only with recorded evidence:
-  - "Release only" work is verified automatically;
-  - a hand-set Verified without evidence is moved back and its issue reopened.
+Sheriff updates `Stage` on its own:
 
-Stages never move backwards otherwise, and pull requests from forks never count. The board's views are Needs you,
-Blocked, Ready, In flight, Awaiting verification and All open.
+| Event | New stage |
+|---|---|
+| A pull request for the task is opened | In progress |
+| The pull request is merged | Merged |
+| Production serves the merged commit, or the deploy succeeds (with no deploy configured: on merge) | Released |
+| `gh sheriff task verify` records evidence, or the task is "Release only" and was released | Verified |
 
-## Security model
+Stages don't move backwards. Pull requests from forks are ignored. Verified needs recorded evidence: if someone sets
+it by hand, the next sync moves the task back and reopens the issue.
 
-- **Split keys.** The gate App key and the reviewer keys live in separate environments, limited to the default
-  branch. No job that reads pull request content holds the App key.
-- **Pull request code never runs.** Every trigger runs the default branch's `sheriff.yml`. The reviewer reads the
-  change as data: read-only tools, no shell, symlinks removed.
-- **One verdict per head.** The `Review` check run is bound to the head and its merge base, and only the gate App
-  can write it.
-- **No re-rolls.** Rounds are recorded before any model runs, partial re-runs don't review, and an edited verdict
-  blocks.
-- **The installer is checked.** It merges only the single commit it wrote, verified by sha and file list.
-- **Sheriff checks itself.** Its own CI runs its tests, actionlint and zizmor on every change.
+The board has these views:
+- Needs you;
+- Blocked;
+- Ready;
+- In flight;
+- Awaiting verification;
+- All open.
 
-## Limits
+## Security
 
-- **An AI reviewer reads author-written text.** It's told to treat that text as data, but a crafted change could
-  still argue for a clean verdict.
-- **You trust Sheriff's `v1` tag.** `sheriff.yml` passes your secrets to Sheriff (`secrets: inherit`), because
-  environment secrets can't reach a shared workflow any other way. Release tags are protected. To review every
-  update, pin a commit sha instead of `@v1`.
-- **One gate App per account.** Repositories with different admins should use separate Apps.
-- **Fork pull requests need a manual review run:** `gh workflow run sheriff.yml -f pr=<n> -f review=true`.
-- **Budgets are per pull request.** A new pull request from the same branch starts a fresh budget.
-- **Auto-add needs one click.** GitHub has no API for a board's Auto-add, so `install` opens the page and waits.
+- The App key and the reviewer keys are in separate environments. No job that reads pull request content has the
+  App key.
+- Pull request code is never executed. Every trigger runs the default branch's copy of `sheriff.yml`. The reviewer
+  only gets read-only file tools, with no shell.
+- The `Review` result is a check run that only your Sheriff App can write. It is tied to one commit and its merge
+  base, so any new push needs a new review.
+- A review is counted before the model runs. Re-running part of a workflow doesn't review again. An edited review
+  blocks until a maintainer allows another.
+- The installer only merges the single commit it created, after checking its sha and files.
+- Sheriff's own CI runs its tests, actionlint and zizmor on every change.
+
+## Known limitations
+
+- **Prompt injection.** The AI reviewer reads text the pull request author wrote. It is instructed to treat that
+  text as data, but a crafted change could still try to talk it into passing.
+- **Trusting `@v1`.** `sheriff.yml` passes your repository secrets to Sheriff's workflows (`secrets: inherit`). That
+  is the only way environment secrets reach a reusable workflow. Release tags are protected. If you want to review
+  every update, pin a commit sha instead of `@v1`.
+- **One App per account.** One GitHub App serves all of an account's repositories. Repositories with different
+  admins should use separate Apps.
+- **Forks.** Pull requests from forks aren't reviewed automatically. Start a review with
+  `gh workflow run sheriff.yml -f pr=<n> -f review=true`.
+- **Per-PR limits.** The review limit counts per pull request. A new pull request starts with a fresh limit.
+- **Auto-add.** The board's Auto-add has to be switched on in the browser, because GitHub has no API for it. `install`
+  opens the page for you.
 
 ## Development
 
 ```sh
 for t in tests/*.test.py; do python3 "$t"; done
-actionlint .github/workflows/*.yml templates/*.yml && zizmor --offline .github/workflows/ templates/ actions/
+actionlint .github/workflows/*.yml templates/*.yml
+zizmor --offline .github/workflows/ templates/ actions/
 ```
 
-Sheriff is standard-library Python plus `gh`:
-- shared workflows in `.github/workflows/`;
-- their steps in `actions/`;
-- scripts in `scripts/`;
-- the files a repository copies in `templates/`.
+Sheriff is standard-library Python and `gh`.
 
-`v1` is a moving tag that fixes advance. A change that needs new permissions in a repository's `sheriff.yml` gets a
-new major version. Issues and pull requests are welcome.
+| Path | Contents |
+|---|---|
+| `.github/workflows/` | Reusable workflows |
+| `actions/` | Their steps |
+| `scripts/` | The logic |
+| `templates/` | The two files `install` adds to a repository |
+
+`v1` is a moving tag that receives fixes. Changes that need new permissions in `sheriff.yml` will ship as `v2`.
+
+Issues and pull requests are welcome.
 
 ## License
 
