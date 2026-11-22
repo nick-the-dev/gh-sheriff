@@ -61,5 +61,15 @@ class TemplatePermissionTests(unittest.TestCase):
         self.assertIn("permissions: {}", (ROOT / "templates/sheriff-relay.yml").read_text())
 
 
+class GateTokenTests(unittest.TestCase):
+    def test_the_gate_token_can_read_the_check_rollup_that_open_rows_requests(self):
+        source = (ROOT / "scripts/gate-status.py").read_text()
+        self.assertIn("statusCheckRollup", source[source.index("def open_rows"):])
+        action = (ROOT / "actions/gate/action.yml").read_text()
+        narrowed = dict(re.findall(r"--permission (\w+)=(\w+)", action))
+        self.assertEqual(narrowed.get("checks"), "read")
+        self.assertEqual(narrowed.get("statuses"), "write")
+
+
 if __name__ == "__main__":
     unittest.main()

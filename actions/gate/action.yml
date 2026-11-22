@@ -41,5 +41,5 @@ runs:
         args=()
         for number in $PR_NUMBER; do args+=(--pr "$number"); done
         python3 -I "$SHERIFF/scripts/app-token.py" --repo "$GH_REPO" --permission statuses=write --permission contents=read \
-          --permission pull_requests=read --permission issues=read --permission actions=read -- \
+          --permission pull_requests=read --permission issues=read --permission actions=read --permission checks=read -- \
           python3 -I "$SHERIFF/scripts/gate-status.py" "${args[@]}"
