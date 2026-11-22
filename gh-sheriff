@@ -151,10 +151,17 @@ def ensure_environment(info, environment=ENVIRONMENT):
     say("ok  environment '" + environment + "' is limited to " + info["branch"])
 
 
-def manifest(owner, port):
+PROJECTS_PERMISSION = "organization_projects"
+
+
+def app_permissions(kind):
+    return dict(GATE_PERMISSIONS, **({PROJECTS_PERMISSION: "write"} if kind == "Organization" else {}))
+
+
+def manifest(owner, port, kind="Organization"):
     return {"name": slug_for(owner), "url": "https://github.com/nick-the-dev/gh-sheriff",
             "redirect_url": "http://127.0.0.1:%d/callback" % port, "public": False,
-            "default_permissions": GATE_PERMISSIONS, "default_events": []}
+            "default_permissions": app_permissions(kind), "default_events": []}
 
 
 def create_gate_app(info, port=8767):
@@ -177,7 +184,7 @@ def create_gate_app(info, port=8767):
             if self.path == "/":
                 self.reply('<form id="f" method="post" action="%s"><input type="hidden" name="manifest" value="%s">'
                            '<button>Create the Sheriff gate App</button></form><script>document.getElementById("f").submit()</script>'
-                           % (html.escape(action), html.escape(json.dumps(manifest(owner, port)))))
+                           % (html.escape(action), html.escape(json.dumps(manifest(owner, port, info["kind"])))))
             elif self.path.startswith("/callback?"):
                 query = dict(part.split("=", 1) for part in self.path.split("?", 1)[1].split("&") if "=" in part)
                 if query.get("state") != state or not query.get("code"):
@@ -846,6 +853,7 @@ def ensure_project(info, title, repository):
                 "createProjectV2IssueField"]["projectV2Field"]
             say("ok  issue field '" + name + "' added to the project")
     ensure_views(info, repository, project, fields, {node["name"] for node in detail["views"]["nodes"]})
+    ensure_status_options(project)
     return project
 
 
@@ -883,6 +891,59 @@ def work_state_problems(info, title):
     return problems
 
 
+STATUS_QUERY = """query($id:ID!){node(id:$id){... on ProjectV2{status:field(name:"Status"){... on ProjectV2SingleSelectField{id options{id name color description}}}}}}"""
+UPDATE_STATUS_OPTIONS = """mutation($input:UpdateProjectV2FieldInput!){updateProjectV2Field(input:$input){projectV2Field{... on ProjectV2SingleSelectField{id}}}}"""
+STAGE_OPTION_COLORS = {"Candidate": "GRAY", "In progress": "YELLOW", "Merged": "BLUE", "Released": "GREEN", "Verified": "PURPLE", "Parked": "ORANGE"}
+STATUS_NOTE = "    the board's built-in Status field mirrors the Stage issue field (Stage is the source; the board groups by it)"
+
+
+def ensure_status_options(project):
+    try:
+        field = WORK.gql(STATUS_QUERY, {"id": project["id"]})["node"].get("status")
+    except (WORK.WorkError, KeyError, TypeError, AttributeError):
+        field = None
+    if not field:
+        say("--  the board has no built-in Status field to mirror Stage into; nothing to set up")
+        return
+    existing = field.get("options") or []
+    missing = [name for name in WORK.STAGES if name not in {option["name"] for option in existing}]
+    if not missing:
+        return
+    options = [{"name": option["name"], "color": option["color"], "description": option.get("description") or ""} for option in existing]
+    options += [{"name": name, "color": STAGE_OPTION_COLORS[name], "description": ""} for name in missing]
+    try:
+        WORK.gql(UPDATE_STATUS_OPTIONS, {"input": {"fieldId": field["id"], "singleSelectOptions": options}})
+    except WORK.WorkError as exc:
+        say("!!  could not add the Status options " + ", ".join(missing) + " (" + str(exc)[:120] + "): add them in the board's Status field settings")
+        return
+    say("ok  Status options added: " + ", ".join(missing))
+    WORK.BOARDS.clear()
+    try:
+        WORK.board_status(project["title"], True)
+        say("ok  Status set to Stage on every board item")
+    except WORK.WorkError as exc:
+        say("!!  Status was not backfilled (" + str(exc)[:120] + "): run gh sheriff task board-status --apply")
+
+
+def projects_permission_problem(info, slug):
+    try:
+        granted = (gh_json(["api", "apps/" + slug]) or {}).get("permissions") or {}
+    except SheriffError:
+        return None
+    if granted.get(PROJECTS_PERMISSION) == "write":
+        return None
+    return ("the App " + slug + " lacks the '" + PROJECTS_PERMISSION + "' permission, so it cannot mirror Stage into the board's Status: open "
+            "https://github.com/organizations/" + info["owner"] + "/settings/apps/" + slug + "/permissions, set Organization permissions > Projects to "
+            "'Read and write', save, then accept the new permission request on the installation (an organization owner must accept it)")
+
+
+def status_differs(title):
+    try:
+        return WORK.board_status(title, False)["differ"]
+    except WORK.WorkError:
+        return 0
+
+
 def install(args):
     info = repo_info(resolve_repo(args.repo))
     if not info["admin"]:
@@ -911,6 +972,7 @@ def install(args):
         if ensure_work_state(info, args.project_name or WORK.board_title(info["repo"]), sys.stdin.isatty() and not args.yes):
             set_variable(info["repo"], "SHERIFF_WORK_STATE", "on")
             say("ok  work state is on: pull requests and releases move each task's Stage")
+            say(STATUS_NOTE)
         else:
             say("--  work state stays off until the issue fields exist")
     say("Done. Every new pull request head is now reviewed by Sheriff, and GitHub merges only what Sheriff marks green.")
@@ -970,6 +1032,17 @@ def doctor(args):
             problems.append("the ruleset is not active")
     if repo_variable(repo, "SHERIFF_WORK_STATE") == "on" and not args.no_work_state:
         problems += work_state_problems(info, args.project_name or WORK.board_title(repo))
+        say(STATUS_NOTE)
+        if info["kind"] == "Organization":
+            problem = projects_permission_problem(info, slug)
+            if problem:
+                problems.append(problem)
+        else:
+            say("--  GitHub Apps cannot write user-owned boards, so Status is mirrored only when you run gh sheriff task board-status --apply with your own gh login")
+        WORK.REPO = repo
+        stale = status_differs(args.project_name or WORK.board_title(repo))
+        if stale:
+            say("!!  " + str(stale) + " board item(s) have a built-in Status that differs from their Stage: run gh sheriff task board-status --apply")
     elif not args.no_work_state:
         say("--  work state is off (repository variable SHERIFF_WORK_STATE is not 'on'); gh sheriff install turns it on")
     for line in problems:

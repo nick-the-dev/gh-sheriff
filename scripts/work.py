@@ -371,6 +371,7 @@ def set_fields(known, item, **values):
     inputs = field_inputs(known, **values)
     if inputs:
         gql(SET_MUTATION, {"issue": item["node"], "fields": inputs})
+    mirror_status(item["node"], values.get("stage"))
 
 
 def comment(item, body, mark=AGENT_MARK):
@@ -478,6 +479,92 @@ def board_id(title):
     return next((node["id"] for node in (owner.get("projectsV2") or {}).get("nodes") or [] if node.get("title") == title), None)
 
 
+ITEMS_QUERY = """query($id:ID!,$cursor:String){node(id:$id){... on ProjectV2{title
+ status:field(name:"Status"){... on ProjectV2SingleSelectField{id options{id name}}}
+ items(first:100,after:$cursor){pageInfo{hasNextPage endCursor}
+  nodes{id status:fieldValueByName(name:"Status"){... on ProjectV2ItemFieldSingleSelectValue{name}}
+   content{... on Issue{issueFieldValues(first:20){nodes{__typename
+    ... on IssueFieldSingleSelectValue{name field{... on IssueFieldSingleSelect{name}}}
+    ... on IssueFieldTextValue{value field{... on IssueFieldText{name}}}}}}}}}}}}"""
+STATUS_QUERY = """query($id:ID!){node(id:$id){... on ProjectV2{status:field(name:"Status"){... on ProjectV2SingleSelectField{id options{id name}}}}}}"""
+ITEM_QUERY = """query($issue:ID!){node(id:$issue){... on Issue{projectItems(first:20){nodes{id project{id title}
+ status:fieldValueByName(name:"Status"){... on ProjectV2ItemFieldSingleSelectValue{name}}}}}}}"""
+SET_STATUS = "mutation($project:ID!,$item:ID!,$field:ID!,$option:String!){updateProjectV2ItemFieldValue(input:{projectId:$project,itemId:$item,fieldId:$field,value:{singleSelectOptionId:$option}}){projectV2Item{id}}}"
+WARNED = set()
+BOARDS = {}
+
+
+def warn(text):
+    if text not in WARNED:
+        WARNED.add(text)
+        print("warning: " + text, file=sys.stderr)
+
+
+def status_state(project, field):
+    field = field or {}
+    return {"project": project, "field": field.get("id"), "options": {option["name"]: option["id"] for option in field.get("options") or []}}
+
+
+def board_state(project):
+    if project not in BOARDS:
+        try:
+            state = status_state(project, gql(STATUS_QUERY, {"id": project})["node"].get("status"))
+        except (WorkError, KeyError, TypeError, AttributeError):
+            state = status_state(project, None)
+        BOARDS[project] = state
+        if not state["field"]:
+            warn("the board has no readable Status field, so Status is not mirrored")
+    return BOARDS[project]
+
+
+def mirror_status(issue_node, stage):
+    if not stage:
+        return
+    try:
+        nodes = ((gql(ITEM_QUERY, {"issue": issue_node}).get("node") or {}).get("projectItems") or {}).get("nodes") or []
+        for entry in nodes:
+            if entry["project"]["title"] != board_title(REPO) or (entry.get("status") or {}).get("name") == stage:
+                continue
+            state = board_state(entry["project"]["id"])
+            if not state["field"]:
+                continue
+            if stage not in state["options"]:
+                warn("the board's Status has no option named " + stage + ", so Status is not mirrored (gh sheriff install adds it)")
+                continue
+            gql(SET_STATUS, {"project": state["project"], "item": entry["id"], "field": state["field"], "option": state["options"][stage]})
+    except WorkError as error:
+        warn("the board refused the Status write, so Status is not mirrored: " + str(error)[:120])
+
+
+def board_status(title, apply):
+    board = board_id(title)
+    if not board:
+        raise WorkError("no board '" + title + "' owned by " + REPO.split("/")[0] + ", or this token cannot read projects (gh auth refresh -s project)")
+    cursor, rows, total = None, [], 0
+    while True:
+        node = gql(ITEMS_QUERY, {"id": board, "cursor": cursor})["node"]
+        total += len(node["items"]["nodes"])
+        for entry in node["items"]["nodes"]:
+            stage = field_values(entry.get("content") or {}).get(FIELDS["stage"])
+            if stage and (entry.get("status") or {}).get("name") != stage:
+                rows.append((entry["id"], stage))
+        if not node["items"]["pageInfo"]["hasNextPage"]:
+            break
+        cursor = node["items"]["pageInfo"]["endCursor"]
+    state = status_state(board, node.get("status"))
+    if not state["field"]:
+        raise WorkError("the board has no Status field")
+    counts = {}
+    for _, stage in rows:
+        counts[stage] = counts.get(stage, 0) + 1
+    if apply:
+        for entry_id, stage in rows:
+            if stage in state["options"]:
+                gql(SET_STATUS, {"project": board, "item": entry_id, "field": state["field"], "option": state["options"][stage]})
+    return {"board": node["title"], "items": total, "differ": len(rows), "by_stage": counts,
+            "no_status_option": sorted(stage for stage in counts if stage not in state["options"]), "applied": bool(apply)}
+
+
 def add_to_board(board, items):
     added = 0
     for item in items:
@@ -511,6 +598,8 @@ def new_task(known, args):
     if board:
         payload["projectV2Ids"] = [board]
     made = gql(CREATE_MUTATION, {"input": payload})["createIssue"]["issue"]
+    if not decision:
+        mirror_status(made["id"], "Candidate")
     return {"id": task, "number": made["number"], "url": made["url"], "on_board": bool(board)}
 
 
@@ -545,6 +634,8 @@ def run(args):
     command = args.task_command
     if command == "sync":
         return sync_text(sync(args.apply, args.task, args.pages))
+    if command == "board-status":
+        return board_status(args.project or board_title(REPO), args.apply)
     if command == "status":
         view = overview(issues("OPEN"))
         return view if args.json else render(view)
@@ -614,6 +705,9 @@ def add_commands(parser):
     synced.add_argument("--apply", action="store_true", help="write the changes (default: only report them)")
     synced.add_argument("--task", help="only this task id")
     synced.add_argument("--pages", type=int, default=PAGES, help="pages of 100 recent merged pull requests and closed issues to read")
+    cleared = sub.add_parser("board-status", parents=[common], help="backfill: set the board's built-in Status to each item's Stage where they differ")
+    cleared.add_argument("--apply", action="store_true", help="write the changes (default: only report them)")
+    cleared.add_argument("--project", help="the board (default: the repository's name plus ' work')")
     return parser
 
 

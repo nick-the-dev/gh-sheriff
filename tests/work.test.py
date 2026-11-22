@@ -471,6 +471,7 @@ class CommandTest(unittest.TestCase):
             "label_id": lambda name: calls.append(("label", name)) or "L1",
             "gql": lambda query, variables=None: calls.append(("gql", variables)) or {"createIssue": {"issue": {"id": "I9", "number": 9, "url": "u9"}}},
             "read_text": lambda path: "x" * 50 if path == "long" else "short",
+            "mirror_status": lambda node, stage: None,
         }
         out = io.StringIO()
         with mock.patch.multiple(work, **patches), mock.patch("sys.stdout", out):
@@ -597,6 +598,88 @@ class WiringTest(unittest.TestCase):
                      ["status", "--json"], ["reply", "A", "--body-file", "-"], ["sync", "--apply", "--pages", "2"]):
             with self.subTest(argv=argv):
                 self.assertEqual(parser.parse_args(argv).task_command, argv[0])
+
+
+BOARD = {"title": "r work", "status": {"id": "SF", "options": [{"id": "O-" + name, "name": name} for name in work.STAGES if name != "Parked"]}}
+
+
+class MirrorStatusTest(unittest.TestCase):
+    def mirror(self, stage, current, title="r work", refuse=False, field=BOARD["status"]):
+        writes = []
+        items = [{"id": "PI", "project": {"id": "P", "title": title}, "status": {"name": current} if current else None}]
+
+        def fake(query, variables=None):
+            if query == work.STATUS_QUERY:
+                return {"node": {"status": field}}
+            if query == work.ITEM_QUERY:
+                return {"node": {"projectItems": {"nodes": items}}}
+            if query == work.SET_STATUS:
+                if refuse:
+                    raise work.WorkError("GitHub: Resource not accessible")
+                writes.append(variables)
+            return {}
+
+        work.BOARDS.clear()
+        work.WARNED.clear()
+        err = io.StringIO()
+        with mock.patch.object(work, "gql", fake), mock.patch("sys.stderr", err):
+            work.mirror_status("N1", stage)
+        return writes, err.getvalue()
+
+    def test_a_stage_write_sets_a_differing_status(self):
+        self.assertEqual(self.mirror("Released", "Merged")[0], [{"project": "P", "item": "PI", "field": "SF", "option": "O-Released"}])
+
+    def test_an_equal_status_is_skipped(self):
+        self.assertEqual(self.mirror("Released", "Released"), ([], ""))
+
+    def test_another_board_is_left_alone(self):
+        self.assertEqual(self.mirror("Released", None, title="other")[0], [])
+
+    def test_a_missing_option_is_skipped_with_a_warning(self):
+        writes, err = self.mirror("Parked", "Merged")
+        self.assertEqual((writes, "no option named Parked" in err), ([], True))
+
+    def test_a_board_without_status_is_skipped_with_a_warning(self):
+        writes, err = self.mirror("Released", None, field=None)
+        self.assertEqual((writes, "no readable Status field" in err), ([], True))
+
+    def test_a_refused_write_is_a_warning(self):
+        writes, err = self.mirror("Released", "Merged", refuse=True)
+        self.assertEqual((writes, "refused the Status write" in err), ([], True))
+
+    def test_set_fields_mirrors_a_stage_write(self):
+        calls = []
+        with mock.patch.object(work, "gql", lambda query, variables=None: calls.append(query) or {}), mock.patch.object(work, "mirror_status", lambda node, stage: calls.append(("mirror", node, stage))):
+            work.set_fields(KNOWN, item(), stage="Merged")
+        self.assertEqual(calls, [work.SET_MUTATION, ("mirror", "N1", "Merged")])
+
+
+class BackfillTest(unittest.TestCase):
+    def backfill(self, apply):
+        def entry(item_id, stage, status):
+            values = [{"__typename": "IssueFieldSingleSelectValue", "name": stage, "field": {"name": "Stage"}}] if stage else []
+            return {"id": item_id, "status": {"name": status} if status else None, "content": {"issueFieldValues": {"nodes": values}}}
+
+        nodes = [entry("I0", "Verified", "Released"), entry("I1", "Merged", "Merged"), entry("I2", "Released", None), entry("I3", None, "x"), entry("I4", "Parked", None)]
+        node = dict(BOARD, items={"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": nodes})
+        writes = []
+
+        def fake(query, variables=None):
+            if query == work.ITEMS_QUERY:
+                return {"node": node}
+            writes.append(variables)
+            return {}
+
+        with mock.patch.object(work, "gql", fake), mock.patch.object(work, "board_id", lambda title: "P"):
+            return work.board_status("r work", apply), writes
+
+    def test_dry_run_counts_by_stage_and_writes_nothing(self):
+        result, writes = self.backfill(False)
+        self.assertEqual((result["differ"], result["by_stage"], result["no_status_option"], writes), (3, {"Verified": 1, "Released": 1, "Parked": 1}, ["Parked"], []))
+
+    def test_apply_sets_status_where_it_differs_and_an_option_exists(self):
+        _, writes = self.backfill(True)
+        self.assertEqual([(write["item"], write["option"]) for write in writes], [("I0", "O-Verified"), ("I2", "O-Released")])
 
 
 if __name__ == "__main__":

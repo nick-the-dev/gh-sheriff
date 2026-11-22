@@ -129,6 +129,7 @@ cost; aim for under 10%.
 | `gh sheriff task set <ID>` | Set fields Sheriff can't infer: `--stage Parked`, `--next "..."`, `--verify` |
 | `gh sheriff task verify <ID> --evidence-file F` | Record what was checked in production. Sets Verified and closes the issue |
 | `gh sheriff task status` | List open tasks by stage, blocked tasks, and comments waiting for a reply |
+| `gh sheriff task board-status [--apply]` | Backfill: set the board's built-in `Status` to each item's `Stage` where they differ (dry run without `--apply`) |
 | `gh sheriff task reply <ID> --body-file F` | Reply to a person's comment on an issue |
 
 ## Configuration
@@ -183,7 +184,7 @@ the default branch can use, so a job from a pull request branch cannot read them
 Each task is a GitHub issue whose title starts with an ID, like `LOGIN-FIX: fix the login page`. A pull request
 belongs to the task when its title ends with `(LOGIN-FIX)` or its branch is named like `ai/LOGIN-FIX`.
 
-Sheriff stores the task state in three issue fields, which also appear as columns on the board:
+Sheriff stores the task state in three issue fields, which also appear as columns on the board. The board's built-in `Status` mirrors `Stage` on every write, which needs the Projects permission described under Configuration:
 
 | Field | Values |
 |---|---|
@@ -237,6 +238,9 @@ The board has these views:
 - **Forks.** Pull requests from forks aren't reviewed automatically. Start a review with
   `gh workflow run sheriff.yml -f pr=<n> -f review=true`.
 - **Per-PR limits.** The review limit counts per pull request. A new pull request starts with a fresh limit.
+- **Status needs a permission.** The board's built-in `Status` mirrors `Stage` and needs the App's organization
+  permission Projects: Read and write (`install` requests it for organization Apps; `doctor` checks it). GitHub Apps
+  cannot write user-owned boards.
 - **Auto-add.** The board's Auto-add has to be switched on in the browser, because GitHub has no API for it. `install`
   opens the page for you.
 

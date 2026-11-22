@@ -190,6 +190,7 @@ class ProjectInstallTests(unittest.TestCase):
             return {}
         fields_repo = repository(["Stage", "Verify by", "Next action"], types, info["kind"])
         with mock.patch.object(cli.WORK, "gql", fake), mock.patch.object(cli, "gh_json", lambda args, stdin=None: posted.append((args, json.loads(stdin)))), \
+                mock.patch.object(cli, "ensure_status_options", lambda project: None), \
                 mock.patch("sys.stdout", out):
             project = cli.ensure_project(info, "r work", fields_repo)
         return project, calls, posted, out.getvalue()
@@ -433,6 +434,53 @@ class WorkStateDoctorTests(unittest.TestCase):
             return {"repository": repository(["Stage", "Verify by", "Next action"])}
         with mock.patch.object(cli.WORK, "gql", fake):
             self.assertIn("gh auth refresh -s project", cli.work_state_problems(ORG, "r work")[0])
+
+
+class StatusMirrorTests(unittest.TestCase):
+    def test_org_manifest_asks_for_projects_write_and_user_manifest_does_not(self):
+        self.assertEqual(cli.manifest("Acme", 8000, "Organization")["default_permissions"]["organization_projects"], "write")
+        self.assertNotIn("organization_projects", cli.manifest("Acme", 8000, "User")["default_permissions"])
+
+    def test_doctor_names_the_settings_page_when_the_permission_is_missing(self):
+        with mock.patch.object(cli, "gh_json", return_value={"permissions": {"checks": "write"}}):
+            problem = cli.projects_permission_problem(ORG, "o-sheriff")
+        self.assertIn("https://github.com/organizations/o/settings/apps/o-sheriff/permissions", problem)
+        self.assertIn("organization owner must accept", problem)
+
+    def test_doctor_is_quiet_when_the_permission_is_granted_or_unreadable(self):
+        with mock.patch.object(cli, "gh_json", return_value={"permissions": {"organization_projects": "write"}}):
+            self.assertIsNone(cli.projects_permission_problem(ORG, "o-sheriff"))
+        with mock.patch.object(cli, "gh_json", side_effect=cli.SheriffError("404")):
+            self.assertIsNone(cli.projects_permission_problem(ORG, "o-sheriff"))
+
+    def run_options(self, existing, fail=False):
+        field = {"id": "SF", "options": [{"id": "x", "name": name, "color": "GRAY", "description": ""} for name in existing]}
+        calls = []
+
+        def fake(query, variables=None):
+            if query == cli.STATUS_QUERY:
+                return {"node": {"status": field}}
+            calls.append((query, variables))
+            if fail and query == cli.UPDATE_STATUS_OPTIONS:
+                raise cli.WORK.WorkError("denied")
+            return {}
+        out = io.StringIO()
+        with mock.patch.object(cli.WORK, "gql", fake), mock.patch.object(cli.WORK, "board_status", lambda title, apply: calls.append(("backfill", apply))), mock.patch("sys.stdout", out):
+            cli.ensure_status_options({"id": "P", "title": "r work"})
+        return calls, out.getvalue()
+
+    def test_missing_stage_options_are_added_keeping_existing_ones_then_backfilled(self):
+        calls, _ = self.run_options(["Candidate", "Needs Nick"])
+        names = [option["name"] for option in calls[0][1]["input"]["singleSelectOptions"]]
+        self.assertEqual((names, calls[1]), (["Candidate", "Needs Nick", "In progress", "Merged", "Released", "Verified", "Parked"], ("backfill", True)))
+
+    def test_complete_options_change_nothing(self):
+        calls, _ = self.run_options(list(cli.WORK.STAGES))
+        self.assertEqual(calls, [])
+
+    def test_a_refused_option_update_prints_a_note_and_skips_the_backfill(self):
+        calls, out = self.run_options(["Candidate"], fail=True)
+        self.assertEqual(([call[0] for call in calls], "add them in the board's Status field settings" in out), ([cli.UPDATE_STATUS_OPTIONS], True))
 
 
 if __name__ == "__main__":
