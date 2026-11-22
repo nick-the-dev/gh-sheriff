@@ -188,15 +188,16 @@ The board has these views:
 - A review is counted before the model runs. Re-running part of a workflow doesn't review again. An edited review
   blocks until a maintainer allows another.
 - The installer only merges the single commit it created, after checking its sha and files.
+- Secrets reach only the Sheriff steps that need them, by name; no workflow inherits all of a repository's secrets.
 - Sheriff's own CI runs its tests, actionlint and zizmor on every change.
 
 ## Known limitations
 
 - **Prompt injection.** The AI reviewer reads text the pull request author wrote. It is instructed to treat that
   text as data, but a crafted change could still try to talk it into passing.
-- **Trusting `@v1`.** `sheriff.yml` passes your repository secrets to Sheriff's workflows (`secrets: inherit`). That
-  is the only way environment secrets reach a reusable workflow. Release tags are protected. If you want to review
-  every update, pin a commit sha instead of `@v1`.
+- **Trusting `@v1`.** Your `sheriff.yml` runs Sheriff's actions at `@v1`, and the steps that need them get your
+  Sheriff secrets by name (never your other secrets). Release tags are protected. If you want to review every update,
+  pin a commit sha instead of `@v1`.
 - **One App per account.** One GitHub App serves all of an account's repositories. Repositories with different
   admins should use separate Apps.
 - **Forks.** Pull requests from forks aren't reviewed automatically. Start a review with

@@ -1,7 +1,8 @@
 name: Sheriff
 
-# Installed by gh sheriff (https://github.com/nick-the-dev/gh-sheriff). The rules live in the shared workflows called
-# below; this file only routes events to them. Comment, relay and schedule triggers always run the default branch's
+# Installed by gh sheriff (https://github.com/nick-the-dev/gh-sheriff). The jobs run here, in this repository's own
+# environments, and every step is one of Sheriff's actions at v1, so fixes arrive without a pull request. Secrets go
+# only to the steps that need them, by name. Comment, relay and schedule triggers always run the default branch's
 # copy of this file, so a pull request cannot change what judges it. A deploy workflow refreshes the gate and the work
 # state when it ends: `gh workflow run sheriff.yml --ref <default branch> -f after_run=<its run id>`.
 on:
@@ -35,29 +36,149 @@ permissions:
 
 jobs:
   gate:
+    name: Sheriff gate
     if: github.event_name != 'issue_comment' || github.event.issue.pull_request
-    uses: nick-the-dev/gh-sheriff/.github/workflows/gate.yml@v1 # zizmor: ignore[unpinned-uses] follows Sheriff v1 so fixes arrive without a pull request
-    secrets: inherit # zizmor: ignore[secrets-inherit] the sheriff environment's secrets reach Sheriff's job only this way
-    with:
-      pr: ${{ inputs.pr }}
-      after_run: ${{ inputs.after_run }}
+    runs-on: ${{ vars.SHERIFF_RUNS_ON || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+    environment:
+      name: sheriff
+      deployment: false
+    concurrency:
+      group: sheriff-gate-${{ github.event.issue.number || github.event.workflow_run.pull_requests[0].number || inputs.pr || 'all' }}
+      cancel-in-progress: true
+    steps:
+      - name: Post the gate statuses
+        uses: nick-the-dev/gh-sheriff/actions/gate@v1 # zizmor: ignore[unpinned-uses] follows Sheriff v1 so fixes arrive without a pull request
+        env:
+          SHERIFF_ACK_AUTHORS: ${{ vars.SHERIFF_ACK_AUTHORS }}
+          SHERIFF_VERSION_URL: ${{ vars.SHERIFF_VERSION_URL }}
+          SHERIFF_HEALTH_URL: ${{ vars.SHERIFF_HEALTH_URL }}
+          SHERIFF_DEPLOY_WORKFLOW: ${{ vars.SHERIFF_DEPLOY_WORKFLOW }}
+          SHERIFF_OVERRIDE: ${{ vars.SHERIFF_OVERRIDE }}
+        with:
+          pr: ${{ github.event.issue.number || join(github.event.workflow_run.pull_requests.*.number, ' ') || inputs.pr }}
+          after-run: ${{ inputs.after_run }}
+          app-id: ${{ secrets.SHERIFF_APP_ID }}
+          app-key: ${{ secrets.SHERIFF_APP_KEY_B64 }}
+
+  reserve:
+    name: Reserve the Sheriff review round
+    if: >-
+      ((github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion == 'success') ||
+      (github.event_name == 'workflow_dispatch' && inputs.review)) &&
+      (inputs.pr || github.event.workflow_run.pull_requests[0].number) != ''
+    concurrency:
+      group: sheriff-reserve-${{ inputs.pr || github.event.workflow_run.pull_requests[0].number }}
+      cancel-in-progress: false
+    runs-on: ${{ vars.SHERIFF_RUNS_ON || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    environment:
+      name: sheriff
+      deployment: false
+    outputs:
+      skip: ${{ steps.reserve.outputs.skip }}
+      head: ${{ steps.reserve.outputs.head }}
+      base: ${{ steps.reserve.outputs.base }}
+      review_id: ${{ steps.reserve.outputs.review_id }}
+      counts: ${{ steps.reserve.outputs.counts }}
+      attempt: ${{ steps.reserve.outputs.attempt }}
+    steps:
+      - name: Count the round as the gate App before any model runs
+        id: reserve
+        uses: nick-the-dev/gh-sheriff/actions/reserve@v1 # zizmor: ignore[unpinned-uses] follows Sheriff v1 so fixes arrive without a pull request
+        with:
+          pr: ${{ inputs.pr || github.event.workflow_run.pull_requests[0].number }}
+          final: ${{ vars.SHERIFF_REVIEW_MODEL || 'claude:claude-opus-5-5' }}
+          first-pass: ${{ vars.SHERIFF_FIRST_PASS }}
+          first-rounds: ${{ vars.SHERIFF_FIRST_PASS_ROUNDS || '3' }}
+          final-rounds: ${{ vars.SHERIFF_REVIEW_ROUNDS || '3' }}
+          unlock-authors: ${{ vars.SHERIFF_UNLOCK_AUTHORS }}
+          app-id: ${{ secrets.SHERIFF_APP_ID }}
+          app-key: ${{ secrets.SHERIFF_APP_KEY_B64 }}
 
   review:
-    if: >-
-      (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.conclusion == 'success') ||
-      (github.event_name == 'workflow_dispatch' && inputs.review && inputs.pr != '')
-    uses: nick-the-dev/gh-sheriff/.github/workflows/review.yml@v1 # zizmor: ignore[unpinned-uses] follows Sheriff v1 so fixes arrive without a pull request
-    secrets: inherit # zizmor: ignore[secrets-inherit] the sheriff environment's secrets reach Sheriff's job only this way
-    with:
-      pr: ${{ inputs.pr }}
+    name: Sheriff review
+    needs: reserve
+    if: needs.reserve.outputs.skip == '' && needs.reserve.outputs.attempt == github.run_attempt
+    runs-on: ${{ vars.SHERIFF_RUNS_ON || 'ubuntu-latest' }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      pull-requests: read
+    environment:
+      name: sheriff-review
+      deployment: false
+    concurrency:
+      group: sheriff-review-${{ inputs.pr || github.event.workflow_run.pull_requests[0].number }}
+      cancel-in-progress: true
+    outputs:
+      verdict: ${{ steps.review.outputs.verdict }}
+    steps:
+      - name: Review the pull request head
+        id: review
+        uses: nick-the-dev/gh-sheriff/actions/review@v1 # zizmor: ignore[unpinned-uses] follows Sheriff v1 so fixes arrive without a pull request
+        with:
+          pr: ${{ inputs.pr || github.event.workflow_run.pull_requests[0].number }}
+          head: ${{ needs.reserve.outputs.head }}
+          base: ${{ needs.reserve.outputs.base }}
+          counts: ${{ needs.reserve.outputs.counts }}
+          final: ${{ vars.SHERIFF_REVIEW_MODEL || 'claude:claude-opus-5-5' }}
+          first-pass: ${{ vars.SHERIFF_FIRST_PASS }}
+          first-rounds: ${{ vars.SHERIFF_FIRST_PASS_ROUNDS || '3' }}
+          final-rounds: ${{ vars.SHERIFF_REVIEW_ROUNDS || '3' }}
+          claude-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          opencode-key: ${{ secrets.OPENCODE_API_KEY }}
+
+  post:
+    name: Post the Sheriff verdict
+    needs: [reserve, review]
+    if: needs.review.outputs.verdict != '' && needs.reserve.outputs.attempt == github.run_attempt
+    runs-on: ${{ vars.SHERIFF_RUNS_ON || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+    environment:
+      name: sheriff
+      deployment: false
+    steps:
+      - name: Post the verdict as the gate App
+        uses: nick-the-dev/gh-sheriff/actions/post@v1 # zizmor: ignore[unpinned-uses] follows Sheriff v1 so fixes arrive without a pull request
+        env:
+          SHERIFF_ACK_AUTHORS: ${{ vars.SHERIFF_ACK_AUTHORS }}
+          SHERIFF_VERSION_URL: ${{ vars.SHERIFF_VERSION_URL }}
+          SHERIFF_HEALTH_URL: ${{ vars.SHERIFF_HEALTH_URL }}
+          SHERIFF_DEPLOY_WORKFLOW: ${{ vars.SHERIFF_DEPLOY_WORKFLOW }}
+          SHERIFF_OVERRIDE: ${{ vars.SHERIFF_OVERRIDE }}
+        with:
+          app-id: ${{ secrets.SHERIFF_APP_ID }}
+          app-key: ${{ secrets.SHERIFF_APP_KEY_B64 }}
+          review-id: ${{ needs.reserve.outputs.review_id }}
 
   state:
+    name: Sync work stages
     if: github.event_name != 'issue_comment' && vars.SHERIFF_WORK_STATE == 'on'
+    runs-on: ${{ vars.SHERIFF_RUNS_ON || 'ubuntu-latest' }}
+    timeout-minutes: 15
     permissions:
       actions: read
       contents: read
       issues: write
       pull-requests: read
-    uses: nick-the-dev/gh-sheriff/.github/workflows/state.yml@v1 # zizmor: ignore[unpinned-uses] follows Sheriff v1 so fixes arrive without a pull request
-    with:
-      after_run: ${{ inputs.after_run }}
+    concurrency:
+      group: sheriff-state
+      cancel-in-progress: false
+    steps:
+      - name: Move each task's Stage from pull request and release facts
+        uses: nick-the-dev/gh-sheriff/actions/state@v1 # zizmor: ignore[unpinned-uses] follows Sheriff v1 so fixes arrive without a pull request
+        env:
+          SHERIFF_VERSION_URL: ${{ vars.SHERIFF_VERSION_URL }}
+          SHERIFF_DEPLOY_WORKFLOW: ${{ vars.SHERIFF_DEPLOY_WORKFLOW }}
+        with:
+          after-run: ${{ inputs.after_run }}
