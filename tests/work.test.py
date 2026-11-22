@@ -435,7 +435,7 @@ class OverviewTest(unittest.TestCase):
                          ([None], ["Q"], ["B"], ["E", "F"]))
         self.assertEqual({stage: ids(rows) for stage, rows in view["stages"].items() if rows},
                          {"Candidate": ["A"], "In progress": ["B"], "Merged": ["C"], "Released": ["D"]})
-        self.assertIn("Needs you: 1", work.render(view))
+        self.assertIn("Needs human: 1", work.render(view))
 
     def test_a_released_blocker_is_met(self):
         view = work.overview([item("A", 1, blocked_by=[{"number": 2, "open": True}]), item("B", 2, "Released")])

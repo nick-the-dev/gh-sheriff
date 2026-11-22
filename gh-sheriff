@@ -620,7 +620,7 @@ def find_project(info, title):
 
 
 def view_specs(stage, decision):
-    return (("Needs you", "table", "is:open " + decision, {}),
+    return (("Needs human", "table", "is:open " + decision, {}),
             ("Blocked", "table", "is:open is:blocked -" + decision, {"group_by": [stage]}),
             ("Ready", "table", "is:open stage:Candidate -is:blocked", {}),
             ("In flight", "board", 'stage:"In progress",Merged', {"vertical_group_by": [stage]}),

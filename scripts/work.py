@@ -530,7 +530,7 @@ def overview(items):
 
 
 def render(view):
-    sections = [("A person commented last: read it and reply", view["replies_waiting"]), ("Needs you", view["needs_you"]),
+    sections = [("A person commented last: read it and reply", view["replies_waiting"]), ("Needs human", view["needs_you"]),
                 ("Blocked", view["blocked"])] + [(stage, view["stages"][stage]) for stage in STAGES] + [("No stage", view["no_stage"])]
     lines = []
     for heading, rows in sections:

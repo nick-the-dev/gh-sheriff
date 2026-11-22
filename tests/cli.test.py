@@ -202,13 +202,13 @@ class ProjectInstallTests(unittest.TestCase):
         self.assertNotIn("createProjectV2(", markers)
         self.assertEqual(markers.count("linkProjectV2ToRepository"), 1)
         self.assertEqual([v["input"]["issueFieldId"] for m, v in calls if m == "createProjectV2IssueField"], ["IF-Verify by", "IF-Next action"])
-        self.assertEqual([body["name"] for _, body in posted], ["Needs you", "Blocked", "In flight", "Awaiting verification", "All open by stage"])
+        self.assertEqual([body["name"] for _, body in posted], ["Needs human", "Blocked", "In flight", "Awaiting verification", "All open by stage"])
         self.assertTrue(all(args[3] == "users/me/projectsV2/3/views" for args, _ in posted))
         bodies = {body["name"]: body for _, body in posted}
         self.assertEqual((bodies["In flight"]["layout"], bodies["In flight"]["vertical_group_by"]), ("board", [2]))
         self.assertEqual(bodies["All open by stage"]["group_by"], [2])
-        self.assertEqual((bodies["Needs you"]["filter"], bodies["Blocked"]["filter"]), ("is:open label:decision", "is:open is:blocked -label:decision"))
-        self.assertEqual(bodies["Needs you"]["visible_fields"][:2], [1, 2])
+        self.assertEqual((bodies["Needs human"]["filter"], bodies["Blocked"]["filter"]), ("is:open label:decision", "is:open is:blocked -label:decision"))
+        self.assertEqual(bodies["Needs human"]["visible_fields"][:2], [1, 2])
 
     def test_a_missing_project_is_created_for_the_owner_and_the_repository(self):
         project, calls, posted, _ = self.run_project(ORG, [], [("Stage", True), ("Verify by", True), ("Next action", True)], linked=True, types=("Task", "Decision"))

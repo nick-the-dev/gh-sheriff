@@ -170,7 +170,7 @@ Stages don't move backwards. Pull requests from forks are ignored. Verified need
 it by hand, the next sync moves the task back and reopens the issue.
 
 The board has these views:
-- Needs you;
+- Needs human;
 - Blocked;
 - Ready;
 - In flight;
