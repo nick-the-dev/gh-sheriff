@@ -105,6 +105,17 @@ class WebTests(unittest.TestCase):
         self.assertTrue({"WebFetch", "WebSearch"} <= set(command[command.index("--disallowedTools"):]))
         self.assertEqual(command[command.index("--max-turns") + 1], "80")
 
+    def test_only_web_tools_can_be_granted(self):
+        command = reviewers.claude_command("m", "p", web=("Bash", "Write", "WebSearch"))
+        self.assertNotIn("Bash", command[:command.index("--disallowedTools")])
+        self.assertNotIn("Write", command[:command.index("--disallowedTools")])
+        self.assertTrue({"Bash", "Write"} <= set(command[command.index("--disallowedTools"):]))
+        self.assertIn("WebSearch", command[:command.index("--disallowedTools")])
+
+    def test_the_claude_run_ignores_user_settings(self):
+        command = reviewers.claude_command("m", "p")
+        self.assertEqual(command[command.index("-p") + 2:command.index("-p") + 4], ["--setting-sources", "project"])
+
     def test_opencode_takes_the_turn_budget_and_never_the_web(self):
         agent = reviewers.opencode_config(40)["agent"]["sheriff-review"]
         self.assertEqual((agent["steps"], agent["permission"]["webfetch"], agent["permission"]["websearch"]), (40, "deny", "deny"))

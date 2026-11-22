@@ -57,9 +57,10 @@ def web_tools(mode, domains):
 
 
 def claude_command(model, prompt, turns=MAX_TURNS, web=()):
+    web = tuple(item for item in web if item.split("(")[0] in ("WebSearch", "WebFetch"))
     granted = {item.split("(")[0] for item in web}
     denied = [tool for tool in ("Bash", "Write", "Edit", "NotebookEdit", "WebFetch", "WebSearch", "Task") if tool not in granted]
-    command = ["npm", "exec", "--yes", "--package=" + CLAUDE_PACKAGE, "--", "claude", "-p", prompt, "--model", model,
+    command = ["npm", "exec", "--yes", "--package=" + CLAUDE_PACKAGE, "--", "claude", "-p", prompt, "--setting-sources", "project", "--model", model,
                "--output-format", "json", "--max-turns", str(turns), "--allowedTools", "Read(./**)", "Grep", "Glob", *web,
                "--disallowedTools", *denied]
     return command + ["Read(" + path + ")" for path in DENIED_READS]
