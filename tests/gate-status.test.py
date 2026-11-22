@@ -446,5 +446,139 @@ class SerialMergeTests(unittest.TestCase):
         self.assertEqual([posted[2][0], posted[3][0], posted[4][0]], ["success", "success", "pending"])
 
 
+DEPLOYED = {"databaseId": 1, "status": "completed", "conclusion": "success", "createdAt": "2026-11-22T10:00:00Z"}
+
+
+class BundleMergeTests(unittest.TestCase):
+    def run_main(self, numbers, undeployed=2, limit="5", args=(), version=None, health=200, deploys=(DEPLOYED,), succeeded=(),
+                 compare_error=False, blocked=(), **settings):
+        posted, self.reads = {}, []
+        version = (200, json.dumps({"sha": OLD if undeployed else HEAD}).encode()) if version is None else version
+        env = {"SHERIFF_DEFAULT_BRANCH": "main", "SHERIFF_MERGE_MODE": "bundle", "SHERIFF_BUNDLE_MAX": limit,
+               "SHERIFF_VERSION_URL": "https://example.test/version.json", "SHERIFF_HEALTH_URL": "https://example.test/health",
+               "SHERIFF_DEPLOY_WORKFLOW": "deploy.yml"}
+        env.update(settings)
+
+        def fake_gh_json(args):
+            if args[:2] == ["pr", "view"]:
+                return {"state": "OPEN", "headRefOid": args[2] * 40, "baseRefName": "main"}
+            if args[:2] == ["run", "list"]:
+                self.reads.append(args)
+                return list(deploys) if "--commit" in args else [{"headSha": sha} for sha in succeeded]
+            if "rules/branches" in args[1]:
+                raise status.GateError("unreadable")
+            return []
+
+        def fake_pages(path):
+            return [comment("owner", "Why?", "2026-11-21T10:00:00Z")] if any("/issues/%d/" % n in path for n in blocked) else []
+
+        def fake_gh(args):
+            if args[:2] == ["api", "repos/{owner}/{repo}/commits/HEAD"]:
+                return HEAD + "\n"
+            if "/compare/" in args[1]:
+                self.reads.append(args)
+                if compare_error:
+                    raise status.GateError("gh api repos/{owner}/{repo}/compare failed: 404")
+                return str(undeployed) + "\n"
+            if args[:2] == ["api", "-X"]:
+                fields = dict(item.split("=", 1) for item in args if "=" in item and not item.startswith("repos/"))
+                posted[int(args[3].split("/")[-1][0])] = (fields["state"], fields["description"])
+            return ""
+
+        with mock.patch.object(status, "gh_json", side_effect=fake_gh_json), \
+             mock.patch.object(status, "gh_pages", side_effect=fake_pages), \
+             mock.patch.object(status, "gh", side_effect=fake_gh), \
+             mock.patch.object(status, "http_get", side_effect=lambda url: version if url.endswith("/version.json") else (health, b"")), \
+             mock.patch.object(status, "open_rows", return_value=[row(n, True) for n in numbers]), \
+             mock.patch.object(status, "current_statuses", return_value={}), \
+             mock.patch.dict(os.environ, env), \
+             mock.patch("builtins.print"):
+            status.main(list(args))
+        return posted
+
+    def test_two_undeployed_of_five_leave_three_slots_for_the_lowest_passing_pull_requests(self):
+        posted = self.run_main([4, 1, 3, 2], undeployed=2)
+        self.assertEqual([posted[n][0] for n in (1, 2, 3)], ["success"] * 3)
+        self.assertEqual(posted[4], ("pending", "waiting for a bundle slot behind #3"))
+        self.assertIn("compare/" + OLD + "..." + HEAD, " ".join(self.reads[-1]))
+
+    def test_a_blocked_pull_request_takes_no_slot(self):
+        posted = self.run_main([1, 2, 3, 4, 5], undeployed=2, blocked=(2,))
+        self.assertEqual(posted[2][0], "failure")
+        self.assertEqual([posted[n][0] for n in (1, 3, 4)], ["success"] * 3)
+        self.assertEqual(posted[5], ("pending", "waiting for a bundle slot behind #4"))
+
+    def test_a_full_bundle_leaves_no_green(self):
+        for undeployed in (5, 7):
+            with self.subTest(undeployed=undeployed):
+                posted = self.run_main([1, 2, 3], undeployed=undeployed)
+                self.assertEqual(set(posted.values()), {("pending", "bundle full: " + str(undeployed) + " merged pull requests wait for the deploy")})
+
+    def test_a_deploy_on_its_way_does_not_block(self):
+        running = {"databaseId": 2, "status": "in_progress", "conclusion": None, "createdAt": "2026-11-22T11:00:00Z"}
+        for deploys in ((running,), ()):
+            with self.subTest(deploys=deploys):
+                posted = self.run_main([1, 2], undeployed=1, deploys=deploys)
+                self.assertEqual(posted[1], ("success", "production is healthy and no deploy failed, comments answered"))
+                self.assertEqual(posted[2][0], "success")
+
+    def test_a_failed_deploy_or_an_unhealthy_production_blocks_every_pull_request(self):
+        failed = {"databaseId": 4, "status": "completed", "conclusion": "failure", "createdAt": "2026-11-22T11:00:00Z"}
+        for case, expected in (({"deploys": (failed,)}, "deploy run 4 for the default branch concluded failure"),
+                               ({"health": 503}, "production health endpoint is not 200"),
+                               ({"version": (500, b"")}, "production version endpoint is not 200")):
+            with self.subTest(expected=expected):
+                posted = self.run_main([1, 2], undeployed=0, **case)
+                self.assertEqual(posted, {1: ("failure", expected), 2: ("failure", expected)})
+
+    def test_an_unreadable_undeployed_count_blocks_every_pull_request(self):
+        posted = self.run_main([1, 2], compare_error=True)
+        self.assertEqual({state for state, _ in posted.values()}, {"failure"})
+        self.assertTrue(posted[1][1].startswith("cannot read the undeployed pull requests: "))
+
+    def test_a_version_without_a_commit_blocks_every_pull_request(self):
+        posted = self.run_main([1], version=(200, b'{"version": "1.2"}'))
+        self.assertEqual(posted[1][0], "failure")
+        self.assertTrue(posted[1][1].startswith("cannot read the undeployed pull requests"))
+
+    def test_without_a_version_url_the_newest_successful_deploy_run_names_the_served_commit(self):
+        posted = self.run_main([1, 2, 3], undeployed=4, succeeded=(OLD,), SHERIFF_VERSION_URL="")
+        self.assertEqual(posted[1][0], "success")
+        self.assertEqual(posted[2], ("pending", "waiting for a bundle slot behind #1"))
+        listing = next(args for args in self.reads if "--status" in args)
+        self.assertEqual(listing, ["run", "list", "--workflow", "deploy.yml", "--branch", "main", "--status", "success", "--limit", "1", "--json", "headSha"])
+        self.assertIn("compare/" + OLD + "..." + HEAD, " ".join(self.reads[-1]))
+
+    def test_without_a_production_reference_nothing_caps_the_bundle(self):
+        for settings in ({"SHERIFF_VERSION_URL": "", "SHERIFF_DEPLOY_WORKFLOW": ""},
+                         {"SHERIFF_VERSION_URL": "", "SHERIFF_DEPLOY_WORKFLOW": "", "SHERIFF_HEALTH_URL": ""},
+                         {"SHERIFF_VERSION_URL": ""}):
+            with self.subTest(settings=settings):
+                posted = self.run_main(range(1, 9), undeployed=9, limit="2", **settings)
+                self.assertEqual({state for state, _ in posted.values()}, {"success"})
+                self.assertFalse(any("/compare/" in args[1] for args in self.reads if args[0] == "api"))
+
+    def test_a_bad_bundle_max_means_five(self):
+        for limit in ("0", "-2", "five", "2.5", ""):
+            with self.subTest(limit=limit):
+                posted = self.run_main([1, 2, 3], undeployed=3, limit=limit)
+                self.assertEqual([posted[n][0] for n in (1, 2, 3)], ["success", "success", "pending"])
+        posted = self.run_main([1, 2], undeployed=3, limit=" 4 ")
+        self.assertEqual([posted[1][0], posted[2]], ["success", ("pending", "waiting for a bundle slot behind #1")])
+
+    def test_the_mode_is_read_case_insensitively_and_anything_else_is_serial(self):
+        self.assertEqual(self.run_main([1, 2], undeployed=0, SHERIFF_MERGE_MODE=" Bundle ")[2][0], "success")
+        for mode in ("", "serial", "bundled", "BUNDLES"):
+            with self.subTest(mode=mode):
+                posted = self.run_main([1, 2], undeployed=0, SHERIFF_MERGE_MODE=mode)
+                self.assertEqual(posted[1], ("success", "production serves the default branch and is healthy, deploy green, comments answered"))
+                self.assertEqual(posted[2], ("pending", "one merge per deploy: waiting for #1"))
+
+    def test_single_mode_counts_the_lower_passing_pull_requests_without_posting_on_them(self):
+        posted = self.run_main([1, 2, 3, 4], undeployed=2, args=["--pr", "4"])
+        self.assertEqual(posted, {4: ("pending", "waiting for a bundle slot behind #3")})
+        self.assertEqual(self.run_main([1, 2, 3, 4], undeployed=1, args=["--pr", "4"]), {4: ("success", "production is healthy and no deploy failed, comments answered")})
+
+
 if __name__ == "__main__":
     unittest.main()

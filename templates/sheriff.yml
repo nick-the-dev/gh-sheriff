@@ -76,6 +76,8 @@ jobs:
         with:
           pr: ${{ github.event.issue.number || join(github.event.workflow_run.pull_requests.*.number, ' ') || inputs.pr }}
           after-run: ${{ inputs.after_run }}
+          merge-mode: ${{ vars.SHERIFF_MERGE_MODE }}
+          bundle-max: ${{ vars.SHERIFF_BUNDLE_MAX }}
           app-id: ${{ secrets.SHERIFF_APP_ID }}
           app-key: ${{ secrets.SHERIFF_APP_KEY_B64 }}
 
@@ -187,6 +189,8 @@ jobs:
           SHERIFF_OVERRIDE: ${{ vars.SHERIFF_OVERRIDE }}
           SHERIFF_PLAN: ${{ vars.SHERIFF_PLAN }}
           SHERIFF_PLAN_SINCE: ${{ vars.SHERIFF_PLAN_SINCE }}
+          SHERIFF_MERGE_MODE: ${{ vars.SHERIFF_MERGE_MODE }}
+          SHERIFF_BUNDLE_MAX: ${{ vars.SHERIFF_BUNDLE_MAX }}
         with:
           app-id: ${{ secrets.SHERIFF_APP_ID }}
           app-key: ${{ secrets.SHERIFF_APP_KEY_B64 }}
@@ -304,6 +308,8 @@ jobs:
           SHERIFF_OVERRIDE: ${{ vars.SHERIFF_OVERRIDE }}
           SHERIFF_PLAN: ${{ vars.SHERIFF_PLAN }}
           SHERIFF_PLAN_SINCE: ${{ vars.SHERIFF_PLAN_SINCE }}
+          SHERIFF_MERGE_MODE: ${{ vars.SHERIFF_MERGE_MODE }}
+          SHERIFF_BUNDLE_MAX: ${{ vars.SHERIFF_BUNDLE_MAX }}
         with:
           issue: ${{ github.event.issue.number || inputs.plan_issue }}
           version: ${{ needs.plan-reserve.outputs.version }}

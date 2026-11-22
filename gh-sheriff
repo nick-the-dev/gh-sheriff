@@ -44,6 +44,9 @@ WORK_SPEC.loader.exec_module(WORK)
 PLAN_SPEC = importlib.util.spec_from_file_location("sheriff_plan", HOME / "scripts" / "plan.py")
 PLAN = importlib.util.module_from_spec(PLAN_SPEC)
 PLAN_SPEC.loader.exec_module(PLAN)
+GATE_SPEC = importlib.util.spec_from_file_location("sheriff_gate", HOME / "scripts" / "gate-status.py")
+GATE = importlib.util.module_from_spec(GATE_SPEC)
+GATE_SPEC.loader.exec_module(GATE)
 FIELD_SPECS = (("Stage", "SINGLE_SELECT", WORK.STAGES), ("Verify by", "SINGLE_SELECT", WORK.VERIFY), ("Next action", "TEXT", ()))
 FIELD_TYPES = {"SINGLE_SELECT": "IssueFieldSingleSelect", "TEXT": "IssueFieldText"}
 OPTION_COLORS = ("GRAY", "BLUE", "PURPLE", "YELLOW", "GREEN", "RED")
@@ -1016,6 +1019,26 @@ def ensure_planning(info, choice, new_install):
     return plan_secrets(repo)
 
 
+def merge_notes(repo, mode):
+    limit = repo_variable(repo, "SHERIFF_BUNDLE_MAX")
+    cap = GATE.bundle_cap(limit)
+    notes = [] if cap or not limit else ["!!  SHERIFF_BUNDLE_MAX=" + limit + " is not a whole number of at least 1, so bundles use " + str(GATE.BUNDLE_MAX)]
+    if not GATE.bundling(mode):
+        return ["--  merges are serial: one pull request per deploy (gh sheriff install --merges bundle batches them)"] + notes
+    if not (repo_variable(repo, "SHERIFF_VERSION_URL") or repo_variable(repo, "SHERIFF_DEPLOY_WORKFLOW")):
+        notes.append("!!  bundle merges have no production reference: set SHERIFF_VERSION_URL or SHERIFF_DEPLOY_WORKFLOW, or nothing caps a bundle")
+    return ["ok  merges are bundled: up to " + str(cap or GATE.BUNDLE_MAX) + " merged pull requests per deploy"] + notes
+
+
+def ensure_merges(info, choice, new_install):
+    repo = info["repo"]
+    current = repo_variable(repo, "SHERIFF_MERGE_MODE")
+    if choice or (new_install and not current):
+        set_variable(repo, "SHERIFF_MERGE_MODE", choice or "serial")
+    for line in merge_notes(repo, choice or current):
+        say(line)
+
+
 def install(args):
     info = repo_info(resolve_repo(args.repo))
     new = not repo_variable(info["repo"], "SHERIFF_APP_SLUG")
@@ -1033,6 +1056,7 @@ def install(args):
     interactive = sys.stdin.isatty() and not args.yes
     ensure_secrets(info, sorted(set(choose_reviewers(info, args.first_pass, args.review_model, interactive)) | ensure_planning(info, args.plan, new)),
                    args.rotate_secrets)
+    ensure_merges(info, args.merges, new)
     if args.no_files and not trigger_files_current(info):
         ensure_auto_merge(info)
         say("--  stopped before the trigger files (--no-files): add .github/workflows/sheriff.yml and sheriff-relay.yml from")
@@ -1123,6 +1147,8 @@ def doctor(args):
             say("!!  " + str(stale) + " board item(s) have a built-in Status that differs from their Stage: run gh sheriff task board-status --apply")
     elif not args.no_work_state:
         say("--  work state is off (repository variable SHERIFF_WORK_STATE is not 'on'); gh sheriff install turns it on")
+    for line in merge_notes(repo, repo_variable(repo, "SHERIFF_MERGE_MODE")):
+        say(line)
     for line in problems:
         say("!!  " + line)
     say("ok  Sheriff is set up correctly on " + repo if not problems else str(len(problems)) + " problem(s); gh sheriff install fixes them")
@@ -1220,6 +1246,8 @@ def main(argv=None):
     install_parser.add_argument("--first-pass", help="cheap first-pass reviewer as provider:model, or '' for none")
     install_parser.add_argument("--review-model", help="final reviewer as provider:model (default claude:claude-opus-5-5)")
     install_parser.add_argument("--plan", choices=("on", "off"), help="plan task issues before review (default: on for a new install)")
+    install_parser.add_argument("--merges", choices=("serial", "bundle"),
+                                help="one merge per deploy, or bundles of up to SHERIFF_BUNDLE_MAX (default: serial for a new install)")
     install_parser.add_argument("--no-browser", action="store_true", help="print the pages to open instead of opening them")
     install_parser.add_argument("--no-files", action="store_true", help="do not open a pull request with the trigger files; add them yourself")
     install_parser.add_argument("--no-work-state", action="store_true", help="skip the issue fields and the project board")

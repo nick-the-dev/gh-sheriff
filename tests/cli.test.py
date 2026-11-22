@@ -578,5 +578,94 @@ class PlanDoctorTests(unittest.TestCase):
             self.assertEqual(cli.plan_problems(ORG, "o-sheriff"), [])
 
 
+class MergeModeInstallTests(unittest.TestCase):
+    def run_merges(self, variables, choice=None, new=False):
+        self.written, self.out = {}, io.StringIO()
+        with mock.patch.object(cli, "repo_variable", side_effect=lambda repo, name: variables.get(name, "")), \
+             mock.patch.object(cli, "set_variable", side_effect=lambda repo, name, value: self.written.__setitem__(name, value)), \
+             mock.patch("sys.stdout", self.out):
+            cli.ensure_merges(ORG, choice, new)
+        return self.written
+
+    def test_a_new_install_defaults_to_serial(self):
+        self.assertEqual(self.run_merges({}, new=True), {"SHERIFF_MERGE_MODE": "serial"})
+        self.assertIn("merges are serial", self.out.getvalue())
+
+    def test_an_existing_value_is_kept_without_the_flag(self):
+        for variables, new in (({"SHERIFF_MERGE_MODE": "bundle", "SHERIFF_VERSION_URL": "u"}, False), ({"SHERIFF_MERGE_MODE": "bundle"}, True), ({}, False)):
+            with self.subTest(variables=variables, new=new):
+                self.assertEqual(self.run_merges(variables, new=new), {})
+        self.run_merges({"SHERIFF_MERGE_MODE": "Bundle", "SHERIFF_VERSION_URL": "u"})
+        self.assertIn("merges are bundled: up to 5", self.out.getvalue())
+
+    def test_the_flag_sets_the_mode(self):
+        for variables, choice, new in (({}, "bundle", True), ({"SHERIFF_MERGE_MODE": "serial"}, "bundle", False), ({"SHERIFF_MERGE_MODE": "bundle"}, "serial", False)):
+            with self.subTest(choice=choice, variables=variables):
+                self.assertEqual(self.run_merges(variables, choice, new), {"SHERIFF_MERGE_MODE": choice})
+                self.assertIn("merges are " + ("bundled" if choice == "bundle" else "serial"), self.out.getvalue())
+
+    def test_install_takes_the_merges_option(self):
+        with mock.patch.object(cli, "install", side_effect=lambda args: self.assertEqual(args.merges, "bundle")):
+            cli.main(["install", "--merges", "bundle"])
+        with mock.patch.object(cli, "install", side_effect=lambda args: self.assertIsNone(args.merges)):
+            cli.main(["install"])
+        with mock.patch("sys.stderr", io.StringIO()), self.assertRaises(SystemExit):
+            cli.main(["install", "--merges", "parallel"])
+
+
+class MergeModeDoctorTests(unittest.TestCase):
+    def notes(self, variables):
+        with mock.patch.object(cli, "repo_variable", side_effect=lambda repo, name: variables.get(name, "")):
+            return cli.merge_notes("o/r", variables.get("SHERIFF_MERGE_MODE", ""))
+
+    def warnings(self, variables):
+        return [line for line in self.notes(variables) if line.startswith("!!")]
+
+    def test_bundle_mode_without_a_production_reference_warns(self):
+        warned = self.warnings({"SHERIFF_MERGE_MODE": "bundle", "SHERIFF_HEALTH_URL": "h"})
+        self.assertEqual(len(warned), 1)
+        self.assertIn("no production reference", warned[0])
+        for reference in ("SHERIFF_VERSION_URL", "SHERIFF_DEPLOY_WORKFLOW"):
+            with self.subTest(reference=reference):
+                self.assertEqual(self.warnings({"SHERIFF_MERGE_MODE": "bundle", reference: "x"}), [])
+        self.assertEqual(self.warnings({}), [])
+
+    def test_the_mode_and_the_cap_are_reported(self):
+        self.assertIn("merges are serial", self.notes({})[0])
+        self.assertIn("merges are bundled: up to 3", self.notes({"SHERIFF_MERGE_MODE": "bundle", "SHERIFF_BUNDLE_MAX": "3", "SHERIFF_VERSION_URL": "u"})[0])
+
+    def test_a_bad_bundle_max_warns_and_means_five(self):
+        for value in ("0", "-1", "lots", "2.5"):
+            with self.subTest(value=value):
+                notes = self.notes({"SHERIFF_MERGE_MODE": "bundle", "SHERIFF_BUNDLE_MAX": value, "SHERIFF_VERSION_URL": "u"})
+                self.assertIn("up to 5", notes[0])
+                self.assertEqual([line for line in notes if line.startswith("!!") and "SHERIFF_BUNDLE_MAX" in line and "5" in line], notes[1:])
+                self.assertEqual(len(notes), 2)
+
+    def test_doctor_prints_the_merge_warning(self):
+        variables = {"SHERIFF_MERGE_MODE": "bundle", "SHERIFF_APP_ID": "1", "SHERIFF_APP_SLUG": "o-sheriff"}
+        policies = mock.Mock(returncode=0, stdout='["main"]')
+        out = io.StringIO()
+        with mock.patch.object(cli, "resolve_repo", return_value="o/r"), \
+             mock.patch.object(cli, "repo_info", return_value=dict(ORG, branch="main", auto_merge=True)), \
+             mock.patch.object(cli, "env_secret_names", return_value=set()), \
+             mock.patch.object(cli, "repo_variable", side_effect=lambda repo, name: variables.get(name, "")), \
+             mock.patch.object(cli.subprocess, "run", return_value=policies), \
+             mock.patch.object(cli, "wanted_trigger_files", return_value={}), \
+             mock.patch.object(cli, "gh_json", return_value=[]), \
+             mock.patch("sys.stdout", out):
+            cli.main(["doctor", "--no-work-state"])
+        self.assertIn("!!  bundle merges have no production reference", out.getvalue())
+
+
+class ReadmeTests(unittest.TestCase):
+    def test_the_readme_has_a_merges_section(self):
+        text = (ROOT / "README.md").read_text()
+        section = text[text.index("\n## Merges\n"):]
+        section = section[:section.index("\n## ", 1)]
+        for part in ("SHERIFF_MERGE_MODE", "SHERIFF_BUNDLE_MAX", "--merges bundle", "serial", "bundle full", "waiting for a bundle slot"):
+            self.assertIn(part, section)
+
+
 if __name__ == "__main__":
     unittest.main()

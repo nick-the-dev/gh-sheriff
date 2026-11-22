@@ -2,7 +2,8 @@
 """Sheriff gate: post the Merge gate commit status on the heads of open pull requests into the default branch.
 
 The Review check run is created by the Sheriff review workflow, as the gate App, so only that App can change it. With
-SHERIFF_PLAN=on the gate also waits for the App's current plan on the pull request's task issue and a Review keyed to it."""
+SHERIFF_PLAN=on the gate also waits for the App's current plan on the pull request's task issue and a Review keyed to it.
+With SHERIFF_MERGE_MODE=bundle up to SHERIFF_BUNDLE_MAX merged pull requests wait for one deploy instead of one."""
 import argparse
 import datetime
 import http.client
@@ -23,9 +24,11 @@ _PLAN_SPEC.loader.exec_module(planner)
 MERGE_CONTEXT = "Merge gate"
 ACK_RE = re.compile(r"<!--\s*sheriff-ack\s*-->")
 COMMAND_RE = re.compile(r"\s*/sheriff (?:review|plan|replan\s+\S.*)\s*", re.S)
-TRANSIENT = ("has not concluded", "production does not serve the default branch", "no deploy run for the default branch",
-             "needs a Sheriff", "could not read the plan")
+DEPLOYING = ("has not concluded", "production does not serve the default branch", "no deploy run for the default branch")
+TRANSIENT = DEPLOYING + ("needs a Sheriff", "could not read the plan")
 DESCRIPTION_LIMIT = 140
+BUNDLE_MAX = 5
+SHA_RE = re.compile(r"[0-9a-f]{40}")
 
 
 class GateError(Exception):
@@ -34,6 +37,18 @@ class GateError(Exception):
 
 def setting(name):
     return (os.environ.get(name) or "").strip()
+
+
+def bundling(mode):
+    return (mode or "").strip().lower() == "bundle"
+
+
+def bundle_cap(value):
+    try:
+        cap = int((value or "").strip())
+    except ValueError:
+        return None
+    return cap if cap >= 1 else None
 
 
 def ack_authors():
@@ -151,8 +166,12 @@ def deploy_failures(workflow, main_sha):
 def production_failures(version_url, health_url, workflow):
     if not (version_url or health_url or workflow):
         return []
+    return production_state(version_url, health_url, workflow)[0]
+
+
+def production_state(version_url, health_url, workflow):
     main_sha = gh(["api", "repos/{owner}/{repo}/commits/HEAD", "--jq", ".sha"]).strip()
-    failures = []
+    failures, served = [], None
     if version_url:
         code, body = http_get(version_url)
         try:
@@ -167,10 +186,32 @@ def production_failures(version_url, health_url, workflow):
         failures.append("production health endpoint is not 200")
     if workflow:
         failures.extend(deploy_failures(workflow, main_sha))
-    return failures
+    return failures, main_sha, served
 
 
-def merge_status(number, comments, prod_failures, listed, override, decision="", prod_checked=True, plan_failure="", plan_note=""):
+def bundle_production(version_url, health_url, workflow, branch):
+    if not (version_url or health_url or workflow):
+        return [], None
+    failures, main_sha, served = production_state(version_url, health_url, workflow)
+    failures = [item for item in failures if not any(mark in item for mark in DEPLOYING)]
+    if not (version_url or workflow):
+        return failures, None
+    try:
+        if not version_url:
+            runs = gh_json(["run", "list", "--workflow", workflow, "--branch", branch, "--status", "success", "--limit", "1", "--json", "headSha"])
+            if runs == []:
+                return failures, None
+            served = runs[0].get("headSha") if isinstance(runs, list) and isinstance(runs[0], dict) else None
+        if not (isinstance(served, str) and SHA_RE.fullmatch(served)):
+            raise GateError("production names no commit")
+        undeployed = 0 if served == main_sha else int(gh(["api", "repos/{owner}/{repo}/compare/" + served + "..." + main_sha, "--jq", ".ahead_by"]))
+    except (GateError, ValueError) as exc:
+        return failures + ["cannot read the undeployed pull requests: " + str(exc)], None
+    return failures, undeployed
+
+
+def merge_status(number, comments, prod_failures, listed, override, decision="", prod_checked=True, plan_failure="", plan_note="",
+                 bundled=False):
     overridden = override == str(number)
     failures = [] if overridden else list(prod_failures)
     if plan_failure:
@@ -184,6 +225,8 @@ def merge_status(number, comments, prod_failures, listed, override, decision="",
             return "success", "override: production checks skipped for this PR by SHERIFF_OVERRIDE" + suffix
         if not prod_checked:
             return "success", "comments answered; no production checks configured" + suffix
+        if bundled:
+            return "success", "production is healthy and no deploy failed, comments answered" + suffix
         return "success", "production serves the default branch and is healthy, deploy green, comments answered" + suffix
     transient = all(any(mark in item for mark in TRANSIENT) for item in failures)
     return ("pending" if transient else "failure"), failures[0]
@@ -301,7 +344,8 @@ def judge(number, prod_failures, listed, override, dry_run, prod_checked=True, d
             post(head, MERGE_CONTEXT, "error", "cannot read this pull request: " + str(exc), dry_run)
         raise
     decision = "CHANGES_REQUESTED" if changes_requested(reviews) else ""
-    state, description = merge_status(number, comments, prod_failures, listed, override, decision, prod_checked, plan_failure, plan_note)
+    state, description = merge_status(number, comments, prod_failures, listed, override, decision, prod_checked, plan_failure, plan_note,
+                                      bundling(setting("SHERIFF_MERGE_MODE")))
     return {"pr": number, "head": head, "state": state, "description": description, "quiet": quiet,
             "current": None if quiet else current_statuses(head)}
 
@@ -345,15 +389,21 @@ def checks_green(row, required=None):
     return all(result in ("SUCCESS", "NEUTRAL", "SKIPPED") for _, result in latest.values())
 
 
-def serialize(judged, armed, green):
+def serialize(judged, armed, green, bundle=None):
     for number in armed:
         if judged.get(number, {}).get("state") == "success" and number not in green:
             judged[number]["state"] = "pending"
             judged[number]["description"] = "waiting for its checks before merging"
     passing = sorted(number for number, item in judged.items() if number in armed and item.get("state") == "success")
-    for number in passing[1:]:
+    undeployed, limit = bundle or (0, 1)
+    if undeployed is None:
+        return
+    slots = max(0, limit - undeployed)
+    for number in passing[slots:]:
         judged[number]["state"] = "pending"
-        judged[number]["description"] = "one merge per deploy: waiting for #" + str(passing[0])
+        judged[number]["description"] = ("one merge per deploy: waiting for #" + str(passing[0]) if bundle is None else
+                                         "waiting for a bundle slot behind #" + str(passing[slots - 1]) if slots else
+                                         "bundle full: " + str(undeployed) + " merged pull requests wait for the deploy")
 
 
 def open_rows():
@@ -372,8 +422,12 @@ def main(argv=None):
         rows = open_rows()
         numbers = args.pr or [row["number"] for row in rows]
         prod_settings = (setting("SHERIFF_VERSION_URL"), setting("SHERIFF_HEALTH_URL"), setting("SHERIFF_DEPLOY_WORKFLOW"))
+        bundled, undeployed = bundling(setting("SHERIFF_MERGE_MODE")), None
         try:
-            prod = production_failures(*prod_settings) if numbers else []
+            if bundled:
+                prod, undeployed = bundle_production(*prod_settings, default_branch) if numbers else ([], None)
+            else:
+                prod = production_failures(*prod_settings) if numbers else []
         except GateError as exc:
             prod = ["cannot read the production state: " + str(exc)]
         override = setting("SHERIFF_OVERRIDE")
@@ -403,7 +457,7 @@ def main(argv=None):
         if number in armed and judged[number].get("state") == "success":
             for lower in sorted(other for other in armed if other < number and other not in judged):
                 run(lower, quiet=True)
-    serialize(judged, armed, green)
+    serialize(judged, armed, green, (undeployed, bundle_cap(setting("SHERIFF_BUNDLE_MAX")) or BUNDLE_MAX) if bundled else None)
     results = [publish(item, args.dry_run) for item in judged.values() if not item.get("quiet")]
     failed = any("error" in item for item in results)
     print(json.dumps({"ok": not failed, "results": results}, ensure_ascii=False), flush=True)

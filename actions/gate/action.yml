@@ -9,6 +9,14 @@ inputs:
     description: Workflow run id to wait for first
     required: false
     default: ""
+  merge-mode:
+    description: serial (one merge per deploy) or bundle (up to bundle-max merged pull requests per deploy); empty means serial
+    required: false
+    default: ""
+  bundle-max:
+    description: Merged pull requests one deploy may carry in bundle mode (empty means 5)
+    required: false
+    default: ""
   app-id:
     description: The Sheriff gate App id
     required: true
@@ -29,6 +37,8 @@ runs:
         AFTER_RUN: ${{ inputs.after-run }}
         SHERIFF: ${{ github.action_path }}/../..
         SHERIFF_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        SHERIFF_MERGE_MODE: ${{ inputs.merge-mode }}
+        SHERIFF_BUNDLE_MAX: ${{ inputs.bundle-max }}
       run: |
         set -euo pipefail
         if [ -z "$AGENT_APP_ID" ] || [ -z "$AGENT_APP_KEY_B64" ]; then

@@ -232,6 +232,28 @@ class PlanWiringTests(unittest.TestCase):
                 self.assertIn("!inputs.plan_issue", block(TEMPLATE, job))
 
 
+class MergeModeWiringTests(unittest.TestCase):
+    def test_the_gate_action_takes_the_merge_settings_as_inputs_through_env(self):
+        action = (ROOT / "actions/gate/action.yml").read_text()
+        step = whole_step(action, "gate-status.py")
+        for key, name in (("merge-mode", "SHERIFF_MERGE_MODE"), ("bundle-max", "SHERIFF_BUNDLE_MAX")):
+            with self.subTest(input=key):
+                section = action[action.index("\n  " + key + ":\n"):]
+                self.assertIn("required: false", section[:300])
+                self.assertIn('default: ""', section[:300])
+                self.assertIn(name + ": ${{ inputs." + key + " }}", step)
+        self.assertNotIn("${{ vars.", action)
+
+    def test_the_template_feeds_the_merge_settings_from_vars_to_every_job_that_runs_the_gate(self):
+        gate = block(TEMPLATE, "gate")
+        self.assertIn("merge-mode: ${{ vars.SHERIFF_MERGE_MODE }}", gate)
+        self.assertIn("bundle-max: ${{ vars.SHERIFF_BUNDLE_MAX }}", gate)
+        for job in ("post", "plan-post"):
+            with self.subTest(job=job):
+                self.assertIn("SHERIFF_MERGE_MODE: ${{ vars.SHERIFF_MERGE_MODE }}", block(TEMPLATE, job))
+                self.assertIn("SHERIFF_BUNDLE_MAX: ${{ vars.SHERIFF_BUNDLE_MAX }}", block(TEMPLATE, job))
+
+
 class GateTokenTests(unittest.TestCase):
     def test_the_gate_token_can_read_the_check_rollup_that_open_rows_requests(self):
         source = (ROOT / "scripts/gate-status.py").read_text()

@@ -69,6 +69,7 @@ flowchart TB
 
    If several pull requests have auto-merge on, only the lowest-numbered one that would pass gets a green `Merge gate`.
    The others stay pending ("one merge per deploy: waiting for #N") until it merges, so merges follow one per deploy.
+   Bundle merges let several merge per deploy (see [Merges](#merges)).
 5. When `Review` and `Merge gate` are both green, GitHub merges the pull request automatically.
 6. Your deploy workflow runs. When production serves the merged commit, Sheriff marks the task Released.
 7. Someone checks the change in production and records it with `gh sheriff task verify`. The task becomes Verified.
@@ -103,6 +104,7 @@ It does the following:
 3. Asks which reviewers to use and stores their keys.
    A new install also turns planning on (`--plan off` skips it) and sets `SHERIFF_PLAN_SINCE`. If the App cannot post
    plans yet, planning stays off and install prints how to grant the permission.
+   A new install merges one pull request per deploy; `--merges bundle` batches them (see [Merges](#merges)).
 4. Opens a pull request that adds `.github/workflows/sheriff.yml` and `sheriff-relay.yml`. Sheriff reviews that pull
    request, and it merges itself. It also lists your repository's workflows that run on pull requests in
    `sheriff.yml`, so the merge gate re-runs as soon as one of them finishes; those runs never start a review. Run
@@ -171,6 +173,36 @@ Issues to Read and write and save. Then accept the new permission request on the
 has to). Until then, a new install leaves planning off, and `--plan on` stops with these steps. `gh sheriff doctor`
 checks this, and `gh sheriff stats` lists plans next to reviews, outside the smart-model share.
 
+## Merges
+
+`SHERIFF_MERGE_MODE` sets how many pull requests may merge per deploy. A new install sets `serial`.
+`gh sheriff install --merges bundle` (or `--merges serial`) switches it, and `install` without `--merges` keeps the
+current value. Bundles need the `sheriff.yml` from this Sheriff version; an older one stays serial.
+
+**Serial (the default).** One pull request per deploy. Only the lowest-numbered auto-merge pull request that would pass
+gets a green `Merge gate`, and with production checks configured only once the last merge is deployed. The others wait
+with "one merge per deploy: waiting for #N".
+
+**Bundle.** Up to `SHERIFF_BUNDLE_MAX` (default 5) merged pull requests wait for one deploy. Sheriff counts the commits
+merged since the commit production serves: the `sha` from `SHERIFF_VERSION_URL`, or without it the newest successful
+run of `SHERIFF_DEPLOY_WORKFLOW` on the default branch. The free slots go to the lowest-numbered auto-merge pull
+requests that would pass. The others stay pending with "waiting for a bundle slot behind #N", or "bundle full: K
+merged pull requests wait for the deploy" when no slot is left.
+
+A deploy on its way doesn't hold a bundle back: production may serve an older commit and a deploy run may still be
+going. A failed deploy run, a version or health endpoint that is not 200, or a count Sheriff cannot read blocks every
+pull request. Without `SHERIFF_VERSION_URL` and `SHERIFF_DEPLOY_WORKFLOW` there is nothing to count from, so nothing
+caps a bundle; `gh sheriff doctor` warns about that. With squash merges one pull request is one commit; with merge
+commits or rebase merges a bundle fills sooner.
+
+**The trade-off.** Each pull request in a bundle is still planned, reviewed and tested on its own; the rest of the gate
+is unchanged. The combination is tested only after it merges, by the default branch's CI and the deploy's health
+check. If that fails, you bisect or revert up to `SHERIFF_BUNDLE_MAX` pull requests instead of one.
+
+Let a newer build cancel an older one on the default branch (`cancel-in-progress: true` in the `concurrency` of the
+workflow that builds what you deploy). Then a bundle builds and ships once, at its newest commit, instead of once per
+merge.
+
 ## What your agents need
 
 Sheriff reports through check runs, commit statuses and pull request reviews. The identity your agents push with
@@ -212,7 +244,7 @@ cost; aim for under 10%.
 
 | Command | Description |
 |---|---|
-| `gh sheriff install` | Set up a repository. Flags: `--repo`, `--first-pass`, `--review-model`, `--plan on\|off`, `--no-work-state`, `--project-name`, `--no-files`, `--yes` |
+| `gh sheriff install` | Set up a repository. Flags: `--repo`, `--first-pass`, `--review-model`, `--plan on\|off`, `--merges serial\|bundle`, `--no-work-state`, `--project-name`, `--no-files`, `--yes` |
 | `gh sheriff doctor` | Check the setup and print what to fix |
 | `gh sheriff models` | Choose the cheap and the Opus reviewer |
 | `gh sheriff stats` | Show review and plan usage and cost for recent pull requests |
@@ -243,6 +275,8 @@ All settings are repository variables. All are optional.
 | `SHERIFF_HEALTH_URL` | none | `Merge gate` fails unless this URL returns 200 |
 | `SHERIFF_DEPLOY_WORKFLOW` | none | Deploy workflow file. `Merge gate` fails if its last run failed |
 | `SHERIFF_OVERRIDE` | none | A pull request number that may merge despite failing production checks |
+| `SHERIFF_MERGE_MODE` | `serial` | `bundle` lets up to `SHERIFF_BUNDLE_MAX` merged pull requests wait for one deploy. Anything else means serial (see [Merges](#merges)) |
+| `SHERIFF_BUNDLE_MAX` | `5` | Merged pull requests one deploy may carry in bundle mode. A value that is not a whole number of at least 1 means 5 |
 | `SHERIFF_ACK_AUTHORS` | none | Logins, other than bots, that count as agents when replying to comments, and as trusted authors for planning |
 | `SHERIFF_UNLOCK_AUTHORS` | none | Logins, other than admins and maintainers, allowed to grant an extra review with `/sheriff review` or an extra plan with `/sheriff plan` |
 | `SHERIFF_RUNS_ON` | `ubuntu-latest` | Runner label for the gate, reviews and work state (see [Runners and Actions minutes](#runners-and-actions-minutes)) |
