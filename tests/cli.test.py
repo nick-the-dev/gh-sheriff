@@ -54,6 +54,11 @@ class StatsTests(unittest.TestCase):
         self.assertEqual(by_model[("plan", "opus")]["reviews"], 1)
         self.assertEqual((total, share), cli.summarise(reviews)[1:])
 
+    def test_a_plan_without_a_model_sorts_with_the_others(self):
+        u = {"input": 1, "cache_read": 0, "cache_write": 0, "output": 1, "cost_usd": 0.0}
+        by_model, _, _ = cli.summarise([{"pr": None, "stage": "plan", "model": None, "usage": u}, {"pr": None, "stage": "plan", "model": "opus", "usage": u}])
+        self.assertEqual([model for _, model in sorted(by_model)], ["", "opus"])
+
     def test_plan_rows_count_only_the_apps_plans_with_usage(self):
         usage = '<!-- sheriff-usage {"provider": "claude", "model": "claude-opus-5-5", "usage": {"input": 5}} -->'
         head = "<!-- sheriff-plan v=1 base=" + "c" * 40 + " -->"

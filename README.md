@@ -119,6 +119,9 @@ posted by Sheriff's App, with six sections:
 - **Production check**: how to verify it after release.
 - **Out of scope**: what the task must not touch.
 
+Only task issues are planned: those whose title starts with a task ID (`<ID>: ...` or `<ID> #n: ...`). Decision issues
+and pull requests never are.
+
 The plan binds the pull request. `Merge gate` stays pending ("needs a Sheriff plan on #N") until the task issue has a
 current plan, and the review gets the plan and checks the pull request against it. A different approach, files outside
 the plan or missing planned tests, without a replan, is a blocking finding. Only a plan comment by Sheriff's App counts,
@@ -202,7 +205,7 @@ cost; aim for under 10%.
 
 | Command | Description |
 |---|---|
-| `gh sheriff install` | Set up a repository. Flags: `--repo`, `--first-pass`, `--review-model`, `--plan on|off`, `--no-work-state`, `--project-name`, `--no-files`, `--yes` |
+| `gh sheriff install` | Set up a repository. Flags: `--repo`, `--first-pass`, `--review-model`, `--plan on\|off`, `--no-work-state`, `--project-name`, `--no-files`, `--yes` |
 | `gh sheriff doctor` | Check the setup and print what to fix |
 | `gh sheriff models` | Choose the cheap and the Opus reviewer |
 | `gh sheriff stats` | Show review and plan usage and cost for recent pull requests |
@@ -269,7 +272,7 @@ Both default to `ubuntu-latest`.
 Self-hosted runners for Sheriff should be ephemeral: one job each. The planner and the reviewer read the job's workspace,
 and a persistent runner shares that workspace with the repository's other jobs.
 
- Sheriff's secrets stay in the `sheriff` and `sheriff-review` environments, which only
+Sheriff's secrets stay in the `sheriff` and `sheriff-review` environments, which only
 the default branch can use, so a job from a pull request branch cannot read them on any runner.
 
 ## Tracking work with Issues and Projects
@@ -333,8 +336,8 @@ The board has these views:
   admins should use separate Apps.
 - **Forks.** Pull requests from forks aren't reviewed automatically. Start a review with
   `gh workflow run sheriff.yml -f pr=<n> -f review=true`.
-- **Commands during a plan.** A `/sheriff plan` or `/sheriff replan` posted while a plan is being written waits for the
-  next command.
+- **Commands during a plan.** A `/sheriff plan` or `/sheriff replan` posted while a plan is being written is answered
+  by a follow-up run after the plan is posted, so its reply comes a little later.
 - **Per-PR limits.** The review limit counts per pull request. A new pull request starts with a fresh limit.
 - **Status needs a permission.** The board's built-in `Status` mirrors `Stage` and needs the App's organization
   permission Projects: Read and write (`install` requests it for organization Apps; `doctor` checks it). GitHub Apps

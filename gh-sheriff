@@ -1171,7 +1171,7 @@ def plan_rows(repo, slug, limit):
 def summarise(rows):
     by_model = {}
     for row in rows:
-        entry = by_model.setdefault((row["stage"], row["model"]), {"reviews": 0, "tokens": 0, "tokens_no_reads": 0, "cost": 0.0})
+        entry = by_model.setdefault((row["stage"], row["model"] or ""), {"reviews": 0, "tokens": 0, "tokens_no_reads": 0, "cost": 0.0})
         entry["reviews"] += 1
         entry["tokens"] += tokens(row["usage"])
         entry["tokens_no_reads"] += tokens(row["usage"], with_reads=False)
