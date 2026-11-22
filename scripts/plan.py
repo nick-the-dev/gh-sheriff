@@ -47,7 +47,7 @@ def read_issue(number, fetch):
     owner, name = os.environ["GH_REPO"].split("/", 1)
     issue, comments, cursor = None, [], None
     while True:
-        args = ["api", "graphql", "-f", "query=" + ISSUE_QUERY, "-F", "owner=" + owner, "-F", "name=" + name, "-F", "number=" + str(number)]
+        args = ["api", "graphql", "-f", "query=" + ISSUE_QUERY, "-f", "owner=" + owner, "-f", "name=" + name, "-F", "number=" + str(number)]
         data = fetch(args + (["-f", "cursor=" + cursor] if cursor else []))
         if not isinstance(data, dict):
             raise PlanError("issue response is not an object")
@@ -102,7 +102,7 @@ def current_plan(comments, slug):
 
 def in_repo(ref, repo):
     target = (ref.get("repository") or {})
-    return ((target.get("owner") or {}).get("login") or "") + "/" + (target.get("name") or "") == repo
+    return (((target.get("owner") or {}).get("login") or "") + "/" + (target.get("name") or "")).lower() == repo.lower()
 
 
 def closing(rows, repo):

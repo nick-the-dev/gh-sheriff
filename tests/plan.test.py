@@ -93,6 +93,20 @@ class FactsTests(unittest.TestCase):
         self.assertIn("cursor=c1", " ".join(calls[1]))
         self.assertEqual(plan.current_plan(issue["comments"], APP)["version"], 1)
 
+    def test_owner_and_name_are_sent_as_strings(self):
+        calls = []
+        with mock.patch.dict(os.environ, {"GH_REPO": "123/456"}):
+            plan.read_issue(12, lambda args: calls.append(args) or gql_page([]))
+        joined = " ".join(calls[0])
+        self.assertIn("-f owner=123", joined)
+        self.assertIn("-f name=456", joined)
+
+    def test_repository_names_match_case_insensitively(self):
+        view = {"title": "x", "closingIssuesReferences": [ref(5, "Owner/Repo")]}
+        with mock.patch.dict(os.environ, {"GH_REPO": "owner/repo"}):
+            found = plan.task_issue(view, "owner/repo", fake_fetch({5: "LOGIN-FIX: a"}, []))
+        self.assertEqual(found["number"], 5)
+
     def test_a_missing_issue_reads_as_none(self):
         with mock.patch.dict(os.environ, {"GH_REPO": "o/r"}):
             self.assertIsNone(plan.read_issue(12, lambda args: {"data": {"repository": {"issue": None}}}))
