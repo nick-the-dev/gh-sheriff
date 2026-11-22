@@ -1,0 +1,63 @@
+name: Sheriff
+
+# Installed by gh sheriff (https://github.com/nick-the-dev/gh-sheriff). The rules live in the shared workflows called
+# below; this file only routes events to them. Comment, relay and schedule triggers always run the default branch's
+# copy of this file, so a pull request cannot change what judges it. A deploy workflow refreshes the gate and the work
+# state when it ends: `gh workflow run sheriff.yml --ref <default branch> -f after_run=<its run id>`.
+on:
+  issue_comment: # zizmor: ignore[dangerous-triggers] runs the default branch's copy; no pull request code runs
+    types: [created, edited, deleted]
+  workflow_run: # zizmor: ignore[dangerous-triggers] runs the default branch's copy; pull request files are read as data
+    workflows: ["Sheriff Relay"]
+    types: [completed]
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: Pull request number (empty for every open pull request)
+        required: false
+        default: ""
+      after_run:
+        description: Workflow run id to wait for first (a deploy run that dispatches this)
+        required: false
+        default: ""
+      review:
+        description: Run the Sheriff reviewer for this pull request
+        type: boolean
+        default: false
+
+permissions:
+  actions: read
+  checks: read
+  contents: read
+  pull-requests: read
+
+jobs:
+  gate:
+    if: github.event_name != 'issue_comment' || github.event.issue.pull_request
+    uses: nick-the-dev/gh-sheriff/.github/workflows/gate.yml@v1 # zizmor: ignore[unpinned-uses] follows Sheriff v1 so fixes arrive without a pull request
+    secrets: inherit # zizmor: ignore[secrets-inherit] the sheriff environment's secrets reach Sheriff's job only this way
+    with:
+      pr: ${{ inputs.pr }}
+      after_run: ${{ inputs.after_run }}
+
+  review:
+    if: >-
+      (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.conclusion == 'success') ||
+      (github.event_name == 'workflow_dispatch' && inputs.review && inputs.pr != '')
+    uses: nick-the-dev/gh-sheriff/.github/workflows/review.yml@v1 # zizmor: ignore[unpinned-uses] follows Sheriff v1 so fixes arrive without a pull request
+    secrets: inherit # zizmor: ignore[secrets-inherit] the sheriff environment's secrets reach Sheriff's job only this way
+    with:
+      pr: ${{ inputs.pr }}
+
+  state:
+    if: github.event_name != 'issue_comment' && vars.SHERIFF_WORK_STATE == 'on'
+    permissions:
+      actions: read
+      contents: read
+      issues: write
+      pull-requests: read
+    uses: nick-the-dev/gh-sheriff/.github/workflows/state.yml@v1 # zizmor: ignore[unpinned-uses] follows Sheriff v1 so fixes arrive without a pull request
+    with:
+      after_run: ${{ inputs.after_run }}

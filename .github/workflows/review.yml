@@ -1,0 +1,114 @@
+name: Sheriff review
+
+# Shared workflow: a repository's sheriff.yml calls it for each new head of a pull request into the default branch.
+# The reserve job runs in the `sheriff` environment, which holds the gate App key, reads no pull request code, and
+# counts the round before any model runs: it posts the App's reservation review on the head, or, when the budget is
+# used or an earlier review was edited, publishes that verdict at once. The review job runs in the `sheriff-review`
+# environment, which holds only the reviewers' keys, and reads the pull request as data with read-only tools; the post
+# job, back in `sheriff`, replaces the reservation with the verdict and publishes it as the App's Review check run,
+# naming the model this workflow ran and binding it to the head and its merge base. A cancelled or failed round still
+# counts.
+on:
+  workflow_call:
+    inputs:
+      pr:
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  reserve:
+    name: Reserve the Sheriff review round
+    if: (inputs.pr || github.event.workflow_run.pull_requests[0].number) != ''
+    concurrency:
+      group: sheriff-reserve-${{ inputs.pr || github.event.workflow_run.pull_requests[0].number }}
+      cancel-in-progress: false
+    runs-on: ${{ vars.SHERIFF_RUNS_ON || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    environment:
+      name: sheriff
+      deployment: false
+    outputs:
+      skip: ${{ steps.reserve.outputs.skip }}
+      head: ${{ steps.reserve.outputs.head }}
+      base: ${{ steps.reserve.outputs.base }}
+      review_id: ${{ steps.reserve.outputs.review_id }}
+      counts: ${{ steps.reserve.outputs.counts }}
+      attempt: ${{ steps.reserve.outputs.attempt }}
+    steps:
+      - name: Count the round as the gate App before any model runs
+        id: reserve
+        uses: nick-the-dev/gh-sheriff/actions/reserve@v1 # zizmor: ignore[unpinned-uses] Sheriff's own action, released with this workflow under the same tag
+        with:
+          pr: ${{ inputs.pr || github.event.workflow_run.pull_requests[0].number }}
+          final: ${{ vars.SHERIFF_REVIEW_MODEL || 'claude:claude-opus-5-5' }}
+          first-pass: ${{ vars.SHERIFF_FIRST_PASS }}
+          first-rounds: ${{ vars.SHERIFF_FIRST_PASS_ROUNDS || '3' }}
+          final-rounds: ${{ vars.SHERIFF_REVIEW_ROUNDS || '3' }}
+          unlock-authors: ${{ vars.SHERIFF_UNLOCK_AUTHORS }}
+          app-id: ${{ secrets.SHERIFF_APP_ID }}
+          app-key: ${{ secrets.SHERIFF_APP_KEY_B64 }}
+
+  review:
+    name: Sheriff review
+    needs: reserve
+    if: needs.reserve.outputs.skip == '' && needs.reserve.outputs.attempt == github.run_attempt
+    runs-on: ${{ vars.SHERIFF_RUNS_ON || 'ubuntu-latest' }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      pull-requests: read
+    environment:
+      name: sheriff-review
+      deployment: false
+    concurrency:
+      group: sheriff-review-${{ inputs.pr || github.event.workflow_run.pull_requests[0].number }}
+      cancel-in-progress: true
+    outputs:
+      verdict: ${{ steps.review.outputs.verdict }}
+    steps:
+      - name: Review the pull request head
+        id: review
+        uses: nick-the-dev/gh-sheriff/actions/review@v1 # zizmor: ignore[unpinned-uses] Sheriff's own action, released with this workflow under the same tag
+        with:
+          pr: ${{ inputs.pr || github.event.workflow_run.pull_requests[0].number }}
+          head: ${{ needs.reserve.outputs.head }}
+          base: ${{ needs.reserve.outputs.base }}
+          counts: ${{ needs.reserve.outputs.counts }}
+          final: ${{ vars.SHERIFF_REVIEW_MODEL || 'claude:claude-opus-5-5' }}
+          first-pass: ${{ vars.SHERIFF_FIRST_PASS }}
+          first-rounds: ${{ vars.SHERIFF_FIRST_PASS_ROUNDS || '3' }}
+          final-rounds: ${{ vars.SHERIFF_REVIEW_ROUNDS || '3' }}
+          claude-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          opencode-key: ${{ secrets.OPENCODE_API_KEY }}
+
+  post:
+    name: Post the Sheriff verdict
+    needs: [reserve, review]
+    if: needs.review.outputs.verdict != '' && needs.reserve.outputs.attempt == github.run_attempt
+    runs-on: ${{ vars.SHERIFF_RUNS_ON || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+    environment:
+      name: sheriff
+      deployment: false
+    steps:
+      - name: Post the verdict as the gate App
+        uses: nick-the-dev/gh-sheriff/actions/post@v1 # zizmor: ignore[unpinned-uses] Sheriff's own action, released with this workflow under the same tag
+        env:
+          SHERIFF_ACK_AUTHORS: ${{ vars.SHERIFF_ACK_AUTHORS }}
+          SHERIFF_VERSION_URL: ${{ vars.SHERIFF_VERSION_URL }}
+          SHERIFF_HEALTH_URL: ${{ vars.SHERIFF_HEALTH_URL }}
+          SHERIFF_DEPLOY_WORKFLOW: ${{ vars.SHERIFF_DEPLOY_WORKFLOW }}
+          SHERIFF_OVERRIDE: ${{ vars.SHERIFF_OVERRIDE }}
+        with:
+          app-id: ${{ secrets.SHERIFF_APP_ID }}
+          app-key: ${{ secrets.SHERIFF_APP_KEY_B64 }}
+          review-id: ${{ needs.reserve.outputs.review_id }}

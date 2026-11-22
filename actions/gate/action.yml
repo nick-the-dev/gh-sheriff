@@ -1,0 +1,45 @@
+name: Sheriff gate
+description: Post the Merge gate commit status on the heads of open pull requests into the default branch, as the Sheriff gate App.
+inputs:
+  pr:
+    description: Pull request numbers separated by spaces (empty for every open pull request)
+    required: false
+    default: ""
+  after-run:
+    description: Workflow run id to wait for first
+    required: false
+    default: ""
+  app-id:
+    description: The Sheriff gate App id
+    required: true
+  app-key:
+    description: The Sheriff gate App private key, base64
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Post statuses
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        GH_REPO: ${{ github.repository }}
+        AGENT_APP_ID: ${{ inputs.app-id }}
+        AGENT_APP_KEY_B64: ${{ inputs.app-key }}
+        PR_NUMBER: ${{ inputs.pr }}
+        AFTER_RUN: ${{ inputs.after-run }}
+        SHERIFF: ${{ github.action_path }}/../..
+        SHERIFF_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      run: |
+        set -euo pipefail
+        if [ -z "$AGENT_APP_ID" ] || [ -z "$AGENT_APP_KEY_B64" ]; then
+          echo "::error title=Sheriff::the sheriff environment needs the secrets SHERIFF_APP_ID and SHERIFF_APP_KEY_B64"
+          exit 1
+        fi
+        if [[ "$AFTER_RUN" =~ ^[0-9]+$ ]]; then
+          gh run watch "$AFTER_RUN" --interval 5 >/dev/null 2>&1 || true
+        fi
+        args=()
+        for number in $PR_NUMBER; do args+=(--pr "$number"); done
+        python3 -I "$SHERIFF/scripts/app-token.py" --repo "$GH_REPO" --permission statuses=write --permission contents=read \
+          --permission pull_requests=read --permission issues=read --permission actions=read -- \
+          python3 -I "$SHERIFF/scripts/gate-status.py" "${args[@]}"

@@ -1,0 +1,37 @@
+name: Sheriff work state
+
+# Shared workflow: a repository's sheriff.yml calls it on a schedule, after pull request activity and after deploys. It
+# moves each task issue's Stage field from facts (an open pull request, a merge, a release) with the job token alone:
+# no App key and no environment, because issue fields are written with the repository's Issues permission.
+on:
+  workflow_call:
+    inputs:
+      after_run:
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    name: Sync work stages
+    runs-on: ${{ vars.SHERIFF_RUNS_ON || 'ubuntu-latest' }}
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: read
+      issues: write
+      pull-requests: read
+    concurrency:
+      group: sheriff-state
+      cancel-in-progress: false
+    steps:
+      - name: Move each task's Stage from pull request and release facts
+        uses: nick-the-dev/gh-sheriff/actions/state@v1 # zizmor: ignore[unpinned-uses] Sheriff's own action, released with this workflow under the same tag
+        env:
+          SHERIFF_VERSION_URL: ${{ vars.SHERIFF_VERSION_URL }}
+          SHERIFF_DEPLOY_WORKFLOW: ${{ vars.SHERIFF_DEPLOY_WORKFLOW }}
+        with:
+          after-run: ${{ inputs.after_run }}

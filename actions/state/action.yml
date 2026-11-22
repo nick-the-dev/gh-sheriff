@@ -1,0 +1,23 @@
+name: Sheriff work state
+description: Move each task issue's Stage field from pull request and release facts, with the job token.
+inputs:
+  after-run:
+    description: Workflow run id to wait for first
+    required: false
+    default: ""
+runs:
+  using: composite
+  steps:
+    - name: Sync work stages
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        GH_REPO: ${{ github.repository }}
+        AFTER_RUN: ${{ inputs.after-run }}
+        SHERIFF: ${{ github.action_path }}/../..
+      run: |
+        set -euo pipefail
+        if [[ "$AFTER_RUN" =~ ^[0-9]+$ ]]; then
+          gh run watch "$AFTER_RUN" --interval 5 >/dev/null 2>&1 || true
+        fi
+        python3 -I "$SHERIFF/scripts/work.py" sync --apply

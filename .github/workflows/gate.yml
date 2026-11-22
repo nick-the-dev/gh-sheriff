@@ -1,0 +1,48 @@
+name: Sheriff gate
+
+# Shared workflow: a repository's sheriff.yml calls it. Runs in the caller's `sheriff` environment (restricted to the
+# default branch), whose secrets SHERIFF_APP_ID and SHERIFF_APP_KEY_B64 belong to the gate App, so only this job can
+# post the Review and Merge gate statuses the ruleset requires.
+on:
+  workflow_call:
+    inputs:
+      pr:
+        type: string
+        required: false
+        default: ""
+      after_run:
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    name: Sheriff gate
+    runs-on: ${{ vars.SHERIFF_RUNS_ON || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+    environment:
+      name: sheriff
+      deployment: false
+    concurrency:
+      group: sheriff-gate-${{ github.event.issue.number || github.event.workflow_run.pull_requests[0].number || inputs.pr || 'all' }}
+      cancel-in-progress: true
+    steps:
+      - name: Post the gate statuses
+        uses: nick-the-dev/gh-sheriff/actions/gate@v1 # zizmor: ignore[unpinned-uses] Sheriff's own action, released with this workflow under the same tag
+        env:
+          SHERIFF_ACK_AUTHORS: ${{ vars.SHERIFF_ACK_AUTHORS }}
+          SHERIFF_VERSION_URL: ${{ vars.SHERIFF_VERSION_URL }}
+          SHERIFF_HEALTH_URL: ${{ vars.SHERIFF_HEALTH_URL }}
+          SHERIFF_DEPLOY_WORKFLOW: ${{ vars.SHERIFF_DEPLOY_WORKFLOW }}
+          SHERIFF_OVERRIDE: ${{ vars.SHERIFF_OVERRIDE }}
+        with:
+          pr: ${{ github.event.issue.number || join(github.event.workflow_run.pull_requests.*.number, ' ') || inputs.pr }}
+          after-run: ${{ inputs.after_run }}
+          app-id: ${{ secrets.SHERIFF_APP_ID }}
+          app-key: ${{ secrets.SHERIFF_APP_KEY_B64 }}

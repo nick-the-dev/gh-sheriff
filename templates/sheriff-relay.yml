@@ -1,0 +1,24 @@
+name: Sheriff Relay
+
+# Installed by gh sheriff. Pull request and review events run a pull request's own copy of a workflow, so this one
+# holds no permissions and does nothing; Sheriff runs from the default branch when it completes (workflow_run). It
+# always runs on a fresh GitHub-hosted machine, so a pull request cannot use it to plant files on a shared runner.
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review, edited, closed]
+  pull_request_review:
+    types: [submitted, edited, dismissed]
+  pull_request_review_comment:
+    types: [created, edited, deleted]
+
+permissions: {}
+
+jobs:
+  relay:
+    name: Relay pull request activity to Sheriff
+    if: github.event.action != 'edited' || github.event.changes.base
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Relay
+        run: echo "pull request activity recorded; Sheriff re-judges this pull request from the default branch"

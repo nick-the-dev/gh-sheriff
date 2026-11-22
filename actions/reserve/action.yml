@@ -1,0 +1,79 @@
+name: Sheriff reserve
+description: Count a review round as the gate App before any model runs (a reservation review on the head), or publish the budget verdict at once; reads no pull request code.
+inputs:
+  pr:
+    description: Pull request number
+    required: true
+  final:
+    description: Final reviewer as provider:model (a bare model means Claude)
+    required: false
+    default: claude:claude-opus-5-5
+  first-pass:
+    description: Cheap first-pass reviewer as provider:model; empty for none
+    required: false
+    default: ""
+  first-rounds:
+    description: Cheap first-pass reviews per pull request before only the final reviewer runs
+    required: false
+    default: "3"
+  final-rounds:
+    description: Final reviews per pull request before a person decides
+    required: false
+    default: "3"
+  unlock-authors:
+    description: Logins besides maintainers and admins whose /sheriff review comment allows one more final review
+    required: false
+    default: ""
+  app-id:
+    description: The Sheriff gate App id
+    required: true
+  app-key:
+    description: The Sheriff gate App private key, base64
+    required: true
+outputs:
+  skip:
+    description: Why no review runs (empty when one runs; decided when the budget verdict was published at once)
+    value: ${{ steps.reserve.outputs.skip }}
+  head:
+    description: The head sha the round is reserved for
+    value: ${{ steps.reserve.outputs.head }}
+  base:
+    description: The merge base of the head and the default branch
+    value: ${{ steps.reserve.outputs.base }}
+  review_id:
+    description: The reservation review that the verdict replaces
+    value: ${{ steps.reserve.outputs.review_id }}
+  counts:
+    description: The rounds already used on the pull request, as JSON
+    value: ${{ steps.reserve.outputs.counts }}
+  attempt:
+    description: The workflow run attempt that made the reservation; later attempts of the same run do not review
+    value: ${{ github.run_attempt }}
+runs:
+  using: composite
+  steps:
+    - name: Reserve the round as the gate App
+      id: reserve
+      shell: bash
+      env:
+        GH_REPO: ${{ github.repository }}
+        AGENT_APP_ID: ${{ inputs.app-id }}
+        AGENT_APP_KEY_B64: ${{ inputs.app-key }}
+        PR: ${{ inputs.pr }}
+        FIRST_PASS: ${{ inputs.first-pass }}
+        FINAL: ${{ inputs.final }}
+        FIRST_ROUNDS: ${{ inputs.first-rounds }}
+        FINAL_ROUNDS: ${{ inputs.final-rounds }}
+        UNLOCKERS: ${{ inputs.unlock-authors }}
+        SHERIFF: ${{ github.action_path }}/../..
+        SHERIFF_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      run: |
+        set -euo pipefail
+        if [ -z "$AGENT_APP_ID" ] || [ -z "$AGENT_APP_KEY_B64" ]; then
+          echo "::error title=Sheriff::the sheriff environment needs the secrets SHERIFF_APP_ID and SHERIFF_APP_KEY_B64"
+          exit 1
+        fi
+        python3 -I "$SHERIFF/scripts/app-token.py" --repo "$GH_REPO" --permission pull_requests=write --permission checks=write --permission statuses=write \
+          --permission issues=read --permission contents=read --permission actions=read -- \
+          python3 -I "$SHERIFF/scripts/review.py" reserve --pr "$PR" --default-branch "$SHERIFF_DEFAULT_BRANCH" --first-pass "$FIRST_PASS" \
+          --final "$FINAL" --first-rounds "$FIRST_ROUNDS" --final-rounds "$FINAL_ROUNDS" --unlock-authors "$UNLOCKERS"
