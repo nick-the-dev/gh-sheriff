@@ -251,17 +251,28 @@ def publish(judged, dry_run):
         post(judged["head"], MERGE_CONTEXT, judged["state"], judged["description"], dry_run, judged["current"])]}
 
 
-def serialize(judged, armed):
+def checks_green(row):
+    for item in row.get("statusCheckRollup") or []:
+        if not isinstance(item, dict) or (item.get("name") or item.get("context")) == MERGE_CONTEXT:
+            continue
+        if (item.get("conclusion") or item.get("state") or "").upper() not in ("SUCCESS", "NEUTRAL", "SKIPPED"):
+            return False
+    return True
+
+
+def serialize(judged, armed, green):
+    for number in armed:
+        if judged.get(number, {}).get("state") == "success" and number not in green:
+            judged[number]["state"] = "pending"
+            judged[number]["description"] = "waiting for its checks before merging"
     passing = sorted(number for number, item in judged.items() if number in armed and item.get("state") == "success")
-    if not passing:
-        return
     for number in passing[1:]:
         judged[number]["state"] = "pending"
         judged[number]["description"] = "one merge per deploy: waiting for #" + str(passing[0])
 
 
 def open_rows():
-    rows = gh_json(["pr", "list", "--state", "open", "--limit", "1000", "--json", "number,autoMergeRequest,baseRefName,headRefOid"])
+    rows = gh_json(["pr", "list", "--state", "open", "--limit", "1000", "--json", "number,autoMergeRequest,baseRefName,headRefOid,statusCheckRollup"])
     return [row for row in rows if isinstance(row, dict) and isinstance(row.get("number"), int)]
 
 
@@ -285,6 +296,7 @@ def main(argv=None):
         print(json.dumps({"ok": False, "error": str(exc)}), flush=True)
         return 1
     armed = {row["number"] for row in rows if row.get("autoMergeRequest") and row.get("baseRefName") == default_branch}
+    green = {row["number"] for row in rows if checks_green(row)}
     judged, queue, swept = {}, list(numbers), not args.pr
 
     def run(number, quiet=False):
@@ -305,7 +317,7 @@ def main(argv=None):
         if number in armed and judged[number].get("state") == "success":
             for lower in sorted(other for other in armed if other < number and other not in judged):
                 run(lower, quiet=True)
-    serialize(judged, armed)
+    serialize(judged, armed, green)
     results = [publish(item, args.dry_run) for item in judged.values() if not item.get("quiet")]
     failed = any("error" in item for item in results)
     print(json.dumps({"ok": not failed, "results": results}, ensure_ascii=False), flush=True)

@@ -193,8 +193,9 @@ class SweepTests(unittest.TestCase):
         self.assertEqual(self.run_main(["--pr", "8", "--pr", "9"], [], failing=(8,)), (1, [8, 9]))
 
 
-def row(number, armed=False, base="main"):
-    return {"number": number, "baseRefName": base, "autoMergeRequest": {"mergeMethod": "SQUASH"} if armed else None}
+def row(number, armed=False, base="main", rollup=()):
+    return {"number": number, "baseRefName": base, "autoMergeRequest": {"mergeMethod": "SQUASH"} if armed else None,
+            "statusCheckRollup": list(rollup)}
 
 
 class SerialMergeTests(unittest.TestCase):
@@ -259,6 +260,21 @@ class SerialMergeTests(unittest.TestCase):
         code, posted, judged = self.run_main(["--pr", "2"], [row(2, True), row(4, True)])
         self.assertEqual(posted[2][0], "success")
         self.assertEqual(judged, [2])
+
+    def test_an_armed_pull_request_with_a_pending_check_does_not_hold_the_next(self):
+        waiting = [{"__typename": "CheckRun", "name": "Review", "status": "IN_PROGRESS", "conclusion": ""}]
+        code, posted, _ = self.run_main([], [row(2, True, rollup=waiting), row(3, True), row(4, True)])
+        self.assertEqual(posted[2], ("pending", "waiting for its checks before merging"))
+        self.assertEqual(posted[3][0], "success")
+        self.assertEqual(posted[4], ("pending", "one merge per deploy: waiting for #3"))
+
+    def test_a_rollup_with_only_merge_gate_counts_as_green(self):
+        gate_only = [{"__typename": "StatusContext", "context": "Merge gate", "state": "PENDING"}]
+        mixed = gate_only + [{"__typename": "CheckRun", "name": "ci", "status": "COMPLETED", "conclusion": "SKIPPED"},
+                             {"__typename": "StatusContext", "context": "lint", "state": "SUCCESS"}]
+        code, posted, _ = self.run_main([], [row(2, True, rollup=gate_only), row(3, True, rollup=mixed)])
+        self.assertEqual(posted[2][0], "success")
+        self.assertEqual(posted[3], ("pending", "one merge per deploy: waiting for #2"))
 
     def test_disarming_the_leader_releases_the_next_armed_pull_request(self):
         code, posted, _ = self.run_main(["--pr", "2"], [row(2, False), row(3, True), row(4, True)])
