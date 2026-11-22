@@ -17,7 +17,7 @@ jobs:
   relay:
     name: Relay pull request activity to Sheriff
     if: github.event.action != 'edited' || github.event.changes.base
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.SHERIFF_RELAY_RUNS_ON || 'ubuntu-latest' }}
     timeout-minutes: 2
     steps:
       - name: Relay

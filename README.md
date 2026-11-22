@@ -72,6 +72,8 @@ one more. A review counts as soon as it starts, so cancelling or re-running it d
 - [GitHub CLI](https://cli.github.com), logged in.
 - Python 3.9 or newer.
 - A Claude subscription, and optionally OpenCode Go (see [Reviewers](#reviewers)).
+- Runners. By default Sheriff runs on GitHub-hosted runners, which bill Actions minutes on private repositories,
+  and Sheriff runs on every pull request event. Plan for self-hosted runners (see [Runners and Actions minutes](#runners-and-actions-minutes)).
 
 ## Install
 
@@ -144,6 +146,8 @@ All settings are repository variables. All are optional.
 | `SHERIFF_OVERRIDE` | none | A pull request number that may merge despite failing production checks |
 | `SHERIFF_ACK_AUTHORS` | none | Logins, other than bots, that count as agents when replying to comments |
 | `SHERIFF_UNLOCK_AUTHORS` | none | Logins, other than admins and maintainers, allowed to grant an extra review with `/sheriff review` |
+| `SHERIFF_RUNS_ON` | `ubuntu-latest` | Runner label for the gate, reviews and work state (see [Runners and Actions minutes](#runners-and-actions-minutes)) |
+| `SHERIFF_RELAY_RUNS_ON` | `ubuntu-latest` | Runner label for the relay |
 
 `install` also sets `SHERIFF_APP_ID`, `SHERIFF_APP_SLUG` and `SHERIFF_WORK_STATE`.
 
@@ -157,6 +161,22 @@ Add this step at the end of your deploy workflow so Sheriff knows a deploy finis
 
 A comment from a person blocks `Merge gate` until an agent replies. The reply must come from a bot, or from a login
 in `SHERIFF_ACK_AUTHORS`, and its last line must be `<!-- sheriff-ack -->`.
+
+## Runners and Actions minutes
+
+**On a private repository, GitHub-hosted runners can use up your Actions minutes fast.** Sheriff runs a job on every
+pull request event: the relay on each push, edit or review, the gate on each of those and after CI and deploys, and a
+review on each new head. Each job is billed as at least one minute, and a model review takes several. One busy
+repository with about 20 agent pull requests a day used about 940 GitHub-hosted minutes in a day, roughly a third of a
+Team plan's monthly allowance. Use self-hosted runners unless the repository is public or quiet.
+
+| Variable | Runs | What it needs |
+|---|---|---|
+| `SHERIFF_RUNS_ON` | Gate, reviews, verdicts, work state | A runner label. These jobs hold the gate App key and the reviewer keys, so give them runners that never run pull request code: one job per runner, and no Docker socket shared with CI jobs |
+| `SHERIFF_RELAY_RUNS_ON` | The relay on pull request events | A runner label. The relay holds no secrets and runs the pull request's own copy of its workflow, so your normal CI runners are fine |
+
+Both default to `ubuntu-latest`. Sheriff's secrets stay in the `sheriff` and `sheriff-review` environments, which only
+the default branch can use, so a job from a pull request branch cannot read them on any runner.
 
 ## Tracking work with Issues and Projects
 
