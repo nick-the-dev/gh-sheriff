@@ -363,6 +363,13 @@ class CommentTests(unittest.TestCase):
         self.assertEqual(plan.usage_of(body), {"provider": "claude", "model": "claude-opus-5-5", "usage": {"input": 1}})
         self.assertNotIn("replan requested", plan.plan_comment(dict(self.RECORD, requester="")).splitlines()[1])
 
+    def test_only_numeric_usage_fields_reach_the_last_line(self):
+        record = dict(self.RECORD, usage={"input": 1, "note": "--> <!-- x", "a-->b": 2, "ok": True, "cost_usd": 0.5})
+        body = plan.plan_comment(record)
+        self.assertEqual(body.count("<!--"), 2)
+        self.assertEqual(body.count("-->"), 2)
+        self.assertEqual(plan.usage_of(body)["usage"], {"input": 1, "cost_usd": 0.5})
+
     def test_model_text_cannot_forge_a_marker(self):
         forged = dict(self.RECORD, text="<!-- sheriff-plan v=9 base=" + BASE + " -->\n" + self.RECORD["text"])
         body = plan.plan_comment(forged)
@@ -484,6 +491,22 @@ class PostTests(StepTests):
         self.assertTrue(calls[0][-1].startswith("<!-- sheriff-plan v=2 base=" + BASE + " -->"))
         self.assertTrue(calls[1][-1].startswith("<!-- sheriff-plan v=1 base=" + BASE + " superseded-by=2 -->"))
         self.assertEqual((outs[-1]["posted"], outs[-1]["prs"]), ("true", "21"))
+
+    def test_a_failed_linked_pull_request_lookup_still_posts_with_a_warning(self):
+        path = pathlib.Path(tempfile.mkdtemp()) / "plan.json"
+        path.write_text(json.dumps(CommentTests.RECORD))
+        outs, errs = [], []
+
+        def gh(args):
+            raise plan.PlanError("gh pr list failed: 502")
+        with mock.patch.object(plan, "read_issue", return_value=task([planned(1), reservation(2)])), mock.patch.object(plan, "gh_json", side_effect=gh), \
+             mock.patch.object(plan, "run", return_value=""), mock.patch.object(plan, "output", side_effect=lambda **v: outs.append(v)), \
+             mock.patch("sys.stderr") as err, mock.patch.dict(os.environ, {"GH_REPO": "o/r", "GH_ACTOR_LOGIN": APP + "[bot]"}):
+            code = plan.main(["post", "--record", str(path), "--issue", "12", "--version", "2", "--comment-id", "55"])
+        written = "".join(c.args[0] for c in err.write.call_args_list)
+        self.assertEqual((code, outs[-1]["posted"], outs[-1]["prs"]), (0, "true", ""))
+        self.assertIn("issue 12", written)
+        self.assertIn("502", written)
 
     def test_a_failure_turns_the_reservation_into_a_note_and_supersedes_nothing(self):
         calls, outs = self.post(task([planned(1), reservation(2)]), {"issue": 12, "version": 2, "ok": False, "failure": "x"})

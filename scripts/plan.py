@@ -225,7 +225,9 @@ def check_plan(text):
 
 def plan_comment(record):
     version, requester = str(record["version"]), record.get("requester") or ""
-    usage = json.dumps({"provider": record["provider"], "model": record["model"], "usage": record["usage"]})
+    numbers = {key: value for key, value in record["usage"].items()
+               if re.fullmatch(r"[a-z_]{1,32}", str(key)) and isinstance(value, (int, float)) and not isinstance(value, bool)}
+    usage = json.dumps({"provider": record["provider"], "model": record["model"], "usage": numbers})
     return ("<!-- sheriff-plan v=" + version + " base=" + record["base"] + " -->\n**Sheriff plan v" + version + "** (`" + record["model"]
             + "`, default branch `" + record["base"][:12] + "`" + (", replan requested by @" + requester if requester else "") + ")\n\n"
             + escape(record["text"]).strip() + "\n\n<!-- sheriff-usage " + usage + " -->")
@@ -482,8 +484,8 @@ def post(args):
         rows = gh_json(["pr", "list", "--state", "open", "--limit", "200", "--json", "number,title,closingIssuesReferences"])
         task = task_id(issue["title"])
         prs = " ".join(str(n) for n in linked_prs(args.issue, task, rows, os.environ["GH_REPO"])) if task else ""
-    except (PlanError, KeyError, TypeError, AttributeError):
-        pass
+    except PlanError as exc:
+        print(json.dumps({"ok": False, "warning": "linked pull requests of issue " + str(args.issue) + " could not be listed: " + str(exc)}), file=sys.stderr, flush=True)
     return output(posted="true", prs=prs)
 
 
