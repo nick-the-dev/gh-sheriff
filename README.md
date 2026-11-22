@@ -8,8 +8,9 @@
 
 Sheriff is a GitHub CLI extension for repositories where AI agents open pull requests. Every push gets an independent
 AI review in CI, cheap model first. GitHub itself refuses to merge anything that review hasn't passed, and admins
-can't bypass it. Work is tracked as **GitHub Issues** on a **GitHub Projects** board, and each task moves to Released
-and Verified on its own.
+can't bypass it. Each piece of work is a **GitHub issue** on a **GitHub Projects** board. Sheriff moves its stage
+as the work progresses: In progress, Merged, then Released once production runs it. Verified requires evidence from a
+live check.
 
 Sheriff is built only from GitHub features: Actions, a GitHub App, rulesets, check runs, Issues and Projects. It
 works the same whatever runs your agents: Claude Code, Codex, LobeHub, a bot or a person.
