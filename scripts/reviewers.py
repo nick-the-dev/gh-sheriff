@@ -7,12 +7,14 @@ A provider spec is `provider:model`, for example `claude:claude-opus-5-5` or
 import json
 import os
 import pathlib
+import re
 import subprocess
 import tempfile
 
 CLAUDE_PACKAGE = "@anthropic-ai/claude-code@2.1.330"
 OPENCODE_PACKAGE = "opencode-ai@1.19.5"
 MAX_TURNS = 80
+WEB_MODES = ("search", "allowlist", "any")
 SECRETS = {"claude": "CLAUDE_CODE_OAUTH_TOKEN", "opencode": "OPENCODE_API_KEY"}
 DENIED_READS = ("//proc/**", "//sys/**", "//etc/**", "~/.claude/**", "~/.config/**", "~/.npm/**",
                 "//home/runner/work/_temp/**", "./pr/.git/**", "./base/.git/**")
@@ -37,10 +39,29 @@ def empty_usage():
     return {"input": 0, "cache_read": 0, "cache_write": 0, "output": 0, "reasoning": 0, "cost_usd": 0.0}
 
 
-def claude_command(model, prompt):
+def web_tools(mode, domains):
+    mode = (mode or "").strip().lower() or "search"
+    if mode not in WEB_MODES:
+        raise ReviewerError("SHERIFF_PLAN_WEB must be search, allowlist or any")
+    if mode == "search":
+        return ("WebSearch",)
+    if mode == "any":
+        return ("WebSearch", "WebFetch")
+    names = [d.strip().lower() for d in (domains or "").split(",") if d.strip()]
+    if not names:
+        raise ReviewerError("SHERIFF_PLAN_WEB=allowlist needs SHERIFF_PLAN_FETCH_DOMAINS")
+    for name in names:
+        if not re.fullmatch(r"(?:\*\.)?[a-z0-9-]+(?:\.[a-z0-9-]+)+", name):
+            raise ReviewerError("not a domain in SHERIFF_PLAN_FETCH_DOMAINS: " + name)
+    return ("WebSearch",) + tuple("WebFetch(domain:" + name + ")" for name in names)
+
+
+def claude_command(model, prompt, turns=MAX_TURNS, web=()):
+    granted = {item.split("(")[0] for item in web}
+    denied = [tool for tool in ("Bash", "Write", "Edit", "NotebookEdit", "WebFetch", "WebSearch", "Task") if tool not in granted]
     command = ["npm", "exec", "--yes", "--package=" + CLAUDE_PACKAGE, "--", "claude", "-p", prompt, "--model", model,
-               "--output-format", "json", "--max-turns", str(MAX_TURNS), "--allowedTools", "Read(./**)", "Grep", "Glob",
-               "--disallowedTools", "Bash", "Write", "Edit", "NotebookEdit", "WebFetch", "WebSearch", "Task"]
+               "--output-format", "json", "--max-turns", str(turns), "--allowedTools", "Read(./**)", "Grep", "Glob", *web,
+               "--disallowedTools", *denied]
     return command + ["Read(" + path + ")" for path in DENIED_READS]
 
 
@@ -62,11 +83,11 @@ def claude_result(raw):
     return str(data["result"]), usage
 
 
-def opencode_config():
+def opencode_config(turns=MAX_TURNS):
     read_rules = {"*": "allow", "pr/.git/**": "deny", "base/.git/**": "deny"}
     denied = ("edit", "bash", "webfetch", "websearch", "task", "skill", "lsp", "question", "todowrite", "external_directory")
     return {"autoupdate": False, "share": "disabled",
-            "agent": {"sheriff-review": {"description": "Sheriff read-only reviewer", "mode": "primary", "steps": MAX_TURNS,
+            "agent": {"sheriff-review": {"description": "Sheriff read-only reviewer", "mode": "primary", "steps": turns,
                                          "permission": {**{name: "deny" for name in denied}, "read": read_rules,
                                                         "glob": "allow", "grep": "allow", "list": "allow"}}}}
 
@@ -105,7 +126,7 @@ def opencode_result(raw):
     return steps[-1], usage
 
 
-def run(spec, prompt, workdir, environ=None):
+def run(spec, prompt, workdir, environ=None, turns=MAX_TURNS, web=()):
     provider, model = spec
     environ = dict(os.environ if environ is None else environ)
     if not (environ.get(SECRETS[provider]) or "").strip():
@@ -113,12 +134,12 @@ def run(spec, prompt, workdir, environ=None):
     keep = {name: value for name, value in environ.items()
             if name in ("PATH", "HOME", "LANG", "TMPDIR", "RUNNER_TEMP", SECRETS[provider]) or name.startswith("npm_config_")}
     if provider == "claude":
-        result = subprocess.run(claude_command(model, prompt), cwd=workdir, env=keep, capture_output=True, text=True, check=False)
+        result = subprocess.run(claude_command(model, prompt, turns, web), cwd=workdir, env=keep, capture_output=True, text=True, check=False)
         text, usage = claude_result(result.stdout)
     else:
         home = pathlib.Path(tempfile.mkdtemp(prefix="sheriff-opencode-"))
         config = home / "opencode.json"
-        config.write_text(json.dumps(opencode_config()))
+        config.write_text(json.dumps(opencode_config(turns)))
         keep.update({"OPENCODE_CONFIG": str(config), "XDG_CONFIG_HOME": str(home / "config"),
                      "XDG_DATA_HOME": str(home / "data"), "XDG_STATE_HOME": str(home / "state"),
                      "XDG_CACHE_HOME": str(home / "cache"), "OPENCODE_DISABLE_AUTOUPDATE": "1"})

@@ -74,5 +74,48 @@ class LockdownTests(unittest.TestCase):
             reviewers.run(("opencode", "opencode-go/x"), "p", ".", {"PATH": "/bin"})
 
 
+class WebTests(unittest.TestCase):
+    def test_web_modes_map_to_claude_tools(self):
+        self.assertEqual(reviewers.web_tools("", ""), ("WebSearch",))
+        self.assertEqual(reviewers.web_tools("search", "x.org"), ("WebSearch",))
+        self.assertEqual(reviewers.web_tools("allowlist", "docs.python.org, *.github.com"),
+                         ("WebSearch", "WebFetch(domain:docs.python.org)", "WebFetch(domain:*.github.com)"))
+        self.assertEqual(reviewers.web_tools("any", ""), ("WebSearch", "WebFetch"))
+
+    def test_bad_web_settings_are_refused(self):
+        for mode, domains in (("all", ""), ("allowlist", ""), ("allowlist", "a.org) Bash(x"), ("allowlist", "localhost")):
+            with self.subTest(mode=mode, domains=domains), self.assertRaises(reviewers.ReviewerError):
+                reviewers.web_tools(mode, domains)
+
+    def test_a_planner_gets_its_web_tools_and_turns_but_never_a_shell(self):
+        command = reviewers.claude_command("m", "p", turns=40, web=("WebSearch",))
+        allowed, denied = command[command.index("--allowedTools"):command.index("--disallowedTools")], command[command.index("--disallowedTools"):]
+        self.assertIn("WebSearch", allowed)
+        self.assertNotIn("WebSearch", denied)
+        self.assertTrue({"Bash", "Write", "Edit", "NotebookEdit", "Task", "WebFetch"} <= set(denied))
+        self.assertEqual(command[command.index("--max-turns") + 1], "40")
+
+    def test_a_fetch_allowlist_keeps_bare_webfetch_off_the_deny_list(self):
+        command = reviewers.claude_command("m", "p", web=("WebSearch", "WebFetch(domain:a.org)"))
+        self.assertIn("WebFetch(domain:a.org)", command[:command.index("--disallowedTools")])
+        self.assertNotIn("WebFetch", command[command.index("--disallowedTools"):])
+
+    def test_the_reviewer_command_is_unchanged_by_default(self):
+        command = reviewers.claude_command("m", "p")
+        self.assertTrue({"WebFetch", "WebSearch"} <= set(command[command.index("--disallowedTools"):]))
+        self.assertEqual(command[command.index("--max-turns") + 1], "80")
+
+    def test_opencode_takes_the_turn_budget_and_never_the_web(self):
+        agent = reviewers.opencode_config(40)["agent"]["sheriff-review"]
+        self.assertEqual((agent["steps"], agent["permission"]["webfetch"], agent["permission"]["websearch"]), (40, "deny", "deny"))
+
+    def test_run_hands_turns_and_web_to_claude(self):
+        seen, fake = [], mock.Mock(returncode=0, stdout=json.dumps({"result": "x", "modelUsage": {}}))
+        with mock.patch.object(reviewers.subprocess, "run", side_effect=lambda command, **k: seen.append(command) or fake):
+            reviewers.run(("claude", "m"), "p", ".", {"PATH": "/bin", "CLAUDE_CODE_OAUTH_TOKEN": "t"}, turns=40, web=("WebSearch",))
+        self.assertIn("WebSearch", seen[0][:seen[0].index("--disallowedTools")])
+        self.assertEqual(seen[0][seen[0].index("--max-turns") + 1], "40")
+
+
 if __name__ == "__main__":
     unittest.main()
