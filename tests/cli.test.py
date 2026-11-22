@@ -469,17 +469,21 @@ class StatusMirrorTests(unittest.TestCase):
             cli.ensure_status_options({"id": "P", "title": "r work"})
         return calls, out.getvalue()
 
-    def test_missing_stage_options_are_added_keeping_existing_ones_then_backfilled(self):
-        calls, _ = self.run_options(["Candidate", "Needs Nick"])
+    def test_a_fresh_board_gets_the_stage_options_then_a_backfill(self):
+        calls, _ = self.run_options(["Todo", "In Progress", "Done"])
         names = [option["name"] for option in calls[0][1]["input"]["singleSelectOptions"]]
-        self.assertEqual((names, calls[1]), (["Candidate", "Needs Nick", "In progress", "Merged", "Released", "Verified", "Parked"], ("backfill", True)))
+        self.assertEqual((names, calls[1]), (["Todo", "In Progress", "Done", "Candidate", "In progress", "Merged", "Released", "Verified", "Parked"], ("backfill", True)))
+
+    def test_a_board_with_its_own_status_options_is_not_rewritten(self):
+        calls, out = self.run_options(["Candidate", "Needs Nick"])
+        self.assertEqual((calls, "add In progress" in out), ([], True))
 
     def test_complete_options_change_nothing(self):
         calls, _ = self.run_options(list(cli.WORK.STAGES))
         self.assertEqual(calls, [])
 
     def test_a_refused_option_update_prints_a_note_and_skips_the_backfill(self):
-        calls, out = self.run_options(["Candidate"], fail=True)
+        calls, out = self.run_options(["Todo", "Done"], fail=True)
         self.assertEqual(([call[0] for call in calls], "add them in the board's Status field settings" in out), ([cli.UPDATE_STATUS_OPTIONS], True))
 
 

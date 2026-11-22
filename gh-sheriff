@@ -897,6 +897,9 @@ STAGE_OPTION_COLORS = {"Candidate": "GRAY", "In progress": "YELLOW", "Merged": "
 STATUS_NOTE = "    the board's built-in Status field mirrors the Stage issue field (Stage is the source; the board groups by it)"
 
 
+GITHUB_DEFAULT_STATUS = {"Todo", "In Progress", "Done"}
+
+
 def ensure_status_options(project):
     try:
         field = WORK.gql(STATUS_QUERY, {"id": project["id"]})["node"].get("status")
@@ -908,6 +911,9 @@ def ensure_status_options(project):
     existing = field.get("options") or []
     missing = [name for name in WORK.STAGES if name not in {option["name"] for option in existing}]
     if not missing:
+        return
+    if {option["name"] for option in existing} - GITHUB_DEFAULT_STATUS:
+        say("--  the board's Status field has its own options; add " + ", ".join(missing) + " there so Status can mirror Stage (rewriting the options could clear item values)")
         return
     options = [{"name": option["name"], "color": option["color"], "description": option.get("description") or ""} for option in existing]
     options += [{"name": name, "color": STAGE_OPTION_COLORS[name], "description": ""} for name in missing]
