@@ -9,6 +9,8 @@ on:
   issue_comment: # zizmor: ignore[dangerous-triggers] runs the default branch's copy; no pull request code runs
     types: [created, edited, deleted]
   workflow_run: # zizmor: ignore[dangerous-triggers] runs the default branch's copy; pull request files are read as data
+    # gh sheriff install adds this repository's pull request workflows next to the relay. Their completion re-runs
+    # the gate job only; a review starts only from the relay (the jobs below check the workflow's name).
     workflows: ["Sheriff Relay"]
     types: [completed]
   schedule:
@@ -67,8 +69,8 @@ jobs:
   reserve:
     name: Reserve the Sheriff review round
     if: >-
-      ((github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' &&
-      github.event.workflow_run.conclusion == 'success') ||
+      ((github.event_name == 'workflow_run' && github.event.workflow_run.name == 'Sheriff Relay' &&
+      github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.conclusion == 'success') ||
       (github.event_name == 'workflow_dispatch' && inputs.review)) &&
       (inputs.pr || github.event.workflow_run.pull_requests[0].number) != ''
     concurrency:
@@ -105,7 +107,9 @@ jobs:
   review:
     name: Sheriff review
     needs: reserve
-    if: needs.reserve.outputs.skip == '' && needs.reserve.outputs.attempt == github.run_attempt
+    if: >-
+      (github.event_name != 'workflow_run' || github.event.workflow_run.name == 'Sheriff Relay') &&
+      needs.reserve.outputs.skip == '' && needs.reserve.outputs.attempt == github.run_attempt
     runs-on: ${{ vars.SHERIFF_RUNS_ON || 'ubuntu-latest' }}
     timeout-minutes: 30
     permissions:
@@ -138,7 +142,9 @@ jobs:
   post:
     name: Post the Sheriff verdict
     needs: [reserve, review]
-    if: needs.review.outputs.verdict != '' && needs.reserve.outputs.attempt == github.run_attempt
+    if: >-
+      (github.event_name != 'workflow_run' || github.event.workflow_run.name == 'Sheriff Relay') &&
+      needs.review.outputs.verdict != '' && needs.reserve.outputs.attempt == github.run_attempt
     runs-on: ${{ vars.SHERIFF_RUNS_ON || 'ubuntu-latest' }}
     timeout-minutes: 10
     permissions:

@@ -394,8 +394,84 @@ def remote_file(repo, path, ref):
     return base64.b64decode(json.loads(out.stdout)["content"]).decode()
 
 
+RELAY_WORKFLOW = "Sheriff Relay"
+WORKFLOWS_LINE = '    workflows: ["' + RELAY_WORKFLOW + '"]'
+PR_EVENT = re.compile(r"(?<![\w-])pull_request(?:_target)?(?![\w-])")
+PR_EVENT_KEY = re.compile(r"^(?:-\s*)?[\"']?pull_request(?:_target)?[\"']?\s*(?::|$)")
+
+
+def yaml_scalar(text):
+    text = text.strip()
+    if text[:1] == '"':
+        match = re.match(r'"((?:[^"\\]|\\.)*)"', text)
+        return json.loads('"' + match.group(1) + '"') if match else text
+    if text[:1] == "'":
+        match = re.match(r"'((?:[^']|'')*)'", text)
+        return match.group(1).replace("''", "'") if match else text
+    return re.split(r"\s#", text, maxsplit=1)[0].strip()
+
+
+def workflow_name_and_pr_trigger(path, text):
+    name, events, in_on = path, False, False
+    on_indent = None
+    for line in text.splitlines():
+        if re.match(r"^name\s*:", line):
+            given = yaml_scalar(line.split(":", 1)[1])
+            name = given or path
+            continue
+        if re.match(r"^[\"']?(?:on|true)[\"']?\s*:", line):
+            rest = line.split(":", 1)[1]
+            in_on, on_indent = True, None
+            if re.sub(r"\s#.*$", "", rest).strip():
+                events = events or bool(PR_EVENT.search(re.sub(r"\s#.*$", "", rest)))
+                in_on = False
+            continue
+        if in_on:
+            code = re.sub(r"\s#.*$", "", line).rstrip()
+            if not code.strip() or code.lstrip().startswith("#"):
+                continue
+            if not line[:1].isspace():
+                in_on = False
+                continue
+            indent = len(line) - len(line.lstrip())
+            on_indent = indent if on_indent is None else on_indent
+            if indent == on_indent and PR_EVENT_KEY.match(code.strip()):
+                events = True
+    return name, events
+
+
+def pr_workflow_names(repo, branch):
+    listing = gh_json(["api", "repos/" + repo + "/contents/.github/workflows?ref=" + branch]) or []
+    if not isinstance(listing, list):
+        return []
+    names = []
+    for entry in sorted(listing, key=lambda row: str(row.get("name"))):
+        file = str(entry.get("name") or "")
+        if not file.endswith((".yml", ".yaml")) or file in TEMPLATES or entry.get("type") not in (None, "file"):
+            continue
+        path = ".github/workflows/" + file
+        text = remote_file(repo, path, branch)
+        if text is None:
+            continue
+        name, triggers = workflow_name_and_pr_trigger(path, text)
+        if triggers and name not in ("Sheriff", RELAY_WORKFLOW) and name not in names:
+            names.append(name)
+    return names
+
+
+def render_template(text, ci_names):
+    listed = [RELAY_WORKFLOW] + [name for name in ci_names if name != RELAY_WORKFLOW]
+    return text.replace(WORKFLOWS_LINE, "    workflows: [" + ", ".join(json.dumps(name, ensure_ascii=False) for name in listed) + "]")
+
+
+def wanted_trigger_files(info):
+    names = pr_workflow_names(info["repo"], info["branch"])
+    return {name: render_template(template_text(name), names) for name in TEMPLATES}
+
+
 def trigger_files_current(info):
-    return all(remote_file(info["repo"], ".github/workflows/" + name, info["branch"]) == (HOME / "templates" / name).read_text()
+    names = pr_workflow_names(info["repo"], info["branch"])
+    return all(remote_file(info["repo"], ".github/workflows/" + name, info["branch"]) == render_template((HOME / "templates" / name).read_text(), names)
                for name in TEMPLATES)
 
 
@@ -415,7 +491,7 @@ def verify_install_pr(repo, number, head_sha, paths):
 
 def ensure_trigger_files(info, wait_merge=True):
     repo, branch = info["repo"], info["branch"]
-    wanted = {".github/workflows/" + name: template_text(name) for name in TEMPLATES}
+    wanted = {".github/workflows/" + name: text for name, text in wanted_trigger_files(info).items()}
     stale = {path: text for path, text in wanted.items() if remote_file(repo, path, branch) != text}
     if not stale:
         say("ok  trigger files are current on " + branch)
@@ -822,8 +898,8 @@ def doctor(args):
                                    "--jq", "[.branch_policies[].name]"], capture_output=True, text=True, check=False)
         if policies.returncode or json.loads(policies.stdout or "[]") != [info["branch"]]:
             problems.append("the '" + environment + "' environment is not limited to " + info["branch"] + " alone")
-    for name in TEMPLATES:
-        if remote_file(repo, ".github/workflows/" + name, info["branch"]) != template_text(name):
+    for name, text in wanted_trigger_files(info).items():
+        if remote_file(repo, ".github/workflows/" + name, info["branch"]) != text:
             problems.append(".github/workflows/" + name + " is missing or differs from this Sheriff version")
     if not repo_info(repo)["auto_merge"]:
         problems.append("auto-merge is off")

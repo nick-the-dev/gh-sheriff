@@ -231,6 +231,80 @@ class ProjectInstallTests(unittest.TestCase):
         self.assertIn("its own field 'Stage'", out)
 
 
+WORKFLOW_FILES = {
+    "ci.yml": "name: CI\non:\n  pull_request:\n    branches: [main]\n  push:\n",
+    "inline.yml": "name: Inline\non: [push, pull_request]\n",
+    "target.yml": "name: Target\non:\n  - pull_request_target\n",
+    "quoted.yml": "name: 'Tests: unit # and \"more\" it''s'\n\"on\":\n  pull_request: {}\n",
+    "colon.yml": 'name: "Build: x # y"\non:\n  pull_request:\n',
+    "unnamed.yml": "on:\n  pull_request:\n",
+    "push-only.yml": "name: Deploy\non:\n  push:\n  workflow_run:\n    workflows: [pull_request]\n",
+    "review-only.yml": "name: Review Bot\non:\n  pull_request_review:\n  # pull_request:\n",
+    "sheriff.yml": "name: Sheriff\non:\n  pull_request:\n",
+    "sheriff-relay.yml": "name: Sheriff Relay\non:\n  pull_request:\n",
+}
+
+
+def fake_repo_workflows(files):
+    def fake_json(args, stdin=None):
+        return [{"name": name, "type": "file"} for name in files]
+
+    def fake_remote(repo, path, ref):
+        return files.get(path.rsplit("/", 1)[1])
+    return mock.patch.object(cli, "gh_json", side_effect=fake_json), mock.patch.object(cli, "remote_file", side_effect=fake_remote)
+
+
+class CiWorkflowTests(unittest.TestCase):
+    def names(self):
+        listing, remote = fake_repo_workflows(WORKFLOW_FILES)
+        with listing, remote:
+            return cli.pr_workflow_names("o/r", "main")
+
+    def test_the_installer_lists_the_pull_request_workflows_by_name_without_sheriffs_own(self):
+        self.assertEqual(self.names(), ["CI", "Build: x # y", "Inline", "Tests: unit # and \"more\" it's", "Target", ".github/workflows/unnamed.yml"])
+
+    def rendered(self, names):
+        return cli.render_template((ROOT / "templates/sheriff.yml").read_text(), names)
+
+    def workflows_list(self, text):
+        line = next(row for row in text.splitlines() if row.startswith("    workflows:"))
+        return json.loads(line.split(":", 1)[1])
+
+    def test_the_rendered_template_lists_the_relay_and_the_ci_workflows_as_quoted_literals(self):
+        names = self.names()
+        text = self.rendered(names)
+        self.assertEqual(self.workflows_list(text), ["Sheriff Relay"] + names)
+        self.assertEqual(text.count("workflows:"), 1)
+
+    def test_a_repository_without_pull_request_workflows_keeps_the_relay_alone(self):
+        self.assertEqual(self.rendered([]), (ROOT / "templates/sheriff.yml").read_text())
+
+    def test_review_reserve_and_post_exclude_runs_of_the_ci_workflows(self):
+        text = self.rendered(self.names())
+        for job in ("reserve", "review", "post"):
+            start = text.index("\n  " + job + ":\n")
+            block = text[start:text.index("\n    runs-on:", start)]
+            condition = block[block.index("    if:"):]
+            with self.subTest(job=job):
+                self.assertIn("github.event.workflow_run.name == 'Sheriff Relay'", condition)
+        gate = text[text.index("\n  gate:\n"):text.index("\n  reserve:\n")]
+        self.assertNotIn("workflow_run.name", gate)
+        self.assertIn("join(github.event.workflow_run.pull_requests.*.number", gate)
+
+    def test_the_relay_and_the_dispatch_review_still_reach_the_review_jobs(self):
+        text = self.rendered([])
+        reserve = text[text.index("\n  reserve:\n"):text.index("\n    concurrency:", text.index("\n  reserve:\n"))]
+        self.assertIn("github.event.workflow_run.conclusion == 'success'", reserve)
+        self.assertIn("github.event_name == 'workflow_dispatch' && inputs.review", reserve)
+
+    def test_the_install_commit_carries_the_rendered_trigger_file(self):
+        listing, remote = fake_repo_workflows({"ci.yml": WORKFLOW_FILES["ci.yml"]})
+        with listing, remote, mock.patch.object(cli, "template_text", side_effect=lambda name: (ROOT / "templates" / name).read_text()):
+            files = cli.wanted_trigger_files({"repo": "o/r", "branch": "main"})
+        self.assertEqual(self.workflows_list(files["sheriff.yml"]), ["Sheriff Relay", "CI"])
+        self.assertEqual(files["sheriff-relay.yml"], (ROOT / "templates/sheriff-relay.yml").read_text())
+
+
 class InstallCommitTests(unittest.TestCase):
     def test_the_trigger_files_arrive_as_one_commit_and_only_our_own_install_prs_are_closed(self):
         posted, closed = [], []

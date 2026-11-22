@@ -90,7 +90,9 @@ It does the following:
    `Merge gate` results.
 3. Asks which reviewers to use and stores their keys.
 4. Opens a pull request that adds `.github/workflows/sheriff.yml` and `sheriff-relay.yml`. Sheriff reviews that pull
-   request, and it merges itself.
+   request, and it merges itself. It also lists your repository's workflows that run on pull requests in
+   `sheriff.yml`, so the merge gate re-runs as soon as one of them finishes; those runs never start a review. Run
+   `install` again after you add or rename such a workflow.
 5. Turns on auto-merge and creates a ruleset named `Sheriff` that requires `Review` and `Merge gate`. Required checks
    you already have are kept.
 6. Adds three issue fields to your account and creates a GitHub Projects board named `<repo> work`. Skip this with
