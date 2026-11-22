@@ -440,7 +440,56 @@ def workflow_name_and_pr_trigger(path, text):
     return name, events
 
 
-def pr_workflow_names(repo, branch):
+def required_contexts(repo, branch):
+    try:
+        rules = gh_json(["api", "repos/" + repo + "/rules/branches/" + branch])
+    except SheriffError:
+        return None
+    if not isinstance(rules, list):
+        return None
+    return {str(entry["context"]) for rule in rules if isinstance(rule, dict) and rule.get("type") == "required_status_checks"
+            for entry in (rule.get("parameters") or {}).get("required_status_checks") or [] if isinstance(entry, dict) and entry.get("context")}
+
+
+def workflow_job_names(text):
+    jobs, in_jobs, job_indent, child_indent, current = [], False, None, None, None
+    for line in text.splitlines():
+        code = re.sub(r"\s#.*$", "", line).rstrip()
+        if not code.strip():
+            continue
+        if re.match(r"^jobs\s*:", code):
+            in_jobs = True
+            continue
+        if not in_jobs:
+            continue
+        if not code[:1].isspace():
+            break
+        indent = len(code) - len(code.lstrip())
+        job_indent = indent if job_indent is None else job_indent
+        header = re.match(r"^([\w-]+|\"[^\"]+\"|'[^']+')\s*:\s*$", code.strip())
+        if indent == job_indent and header:
+            current = {"id": yaml_scalar(header.group(1)), "name": None, "skip": False}
+            jobs.append(current)
+            child_indent = None
+            continue
+        if current is None:
+            continue
+        child_indent = indent if child_indent is None else child_indent
+        body = code.strip()
+        raw = line.strip()
+        if re.match(r"^matrix\s*:", body):
+            current["skip"] = True
+        if indent == child_indent and re.match(r"^uses\s*:", body):
+            current["skip"] = True
+        if indent == child_indent and re.match(r"^name\s*:", body):
+            current["name"] = yaml_scalar(raw.split(":", 1)[1])
+    labels = [job["name"] or job["id"] for job in jobs if not job["skip"]]
+    return [label for label in labels if "${{" not in label]
+
+
+def pr_workflow_names(repo, branch, required):
+    if not required:
+        return []
     listing = gh_json(["api", "repos/" + repo + "/contents/.github/workflows?ref=" + branch]) or []
     if not isinstance(listing, list):
         return []
@@ -454,7 +503,7 @@ def pr_workflow_names(repo, branch):
         if text is None:
             continue
         name, triggers = workflow_name_and_pr_trigger(path, text)
-        if triggers and name not in ("Sheriff", RELAY_WORKFLOW) and name not in names:
+        if triggers and required & set(workflow_job_names(text)) and name not in ("Sheriff", RELAY_WORKFLOW) and name not in names:
             names.append(name)
     return names
 
@@ -465,12 +514,12 @@ def render_template(text, ci_names):
 
 
 def wanted_trigger_files(info):
-    names = pr_workflow_names(info["repo"], info["branch"])
+    names = pr_workflow_names(info["repo"], info["branch"], required_contexts(info["repo"], info["branch"]))
     return {name: render_template(template_text(name), names) for name in TEMPLATES}
 
 
 def trigger_files_current(info):
-    names = pr_workflow_names(info["repo"], info["branch"])
+    names = pr_workflow_names(info["repo"], info["branch"], required_contexts(info["repo"], info["branch"]))
     return all(remote_file(info["repo"], ".github/workflows/" + name, info["branch"]) == render_template((HOME / "templates" / name).read_text(), names)
                for name in TEMPLATES)
 

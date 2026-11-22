@@ -251,7 +251,23 @@ def publish(judged, dry_run):
         post(judged["head"], MERGE_CONTEXT, judged["state"], judged["description"], dry_run, judged["current"])]}
 
 
-def checks_green(row):
+def required_contexts(branch):
+    try:
+        rules = gh_json(["api", "repos/{owner}/{repo}/rules/branches/" + branch])
+    except GateError:
+        return None
+    if not isinstance(rules, list):
+        return None
+    found = set()
+    for rule in rules:
+        if isinstance(rule, dict) and rule.get("type") == "required_status_checks":
+            for entry in (rule.get("parameters") or {}).get("required_status_checks") or []:
+                if isinstance(entry, dict) and entry.get("context"):
+                    found.add(str(entry["context"]))
+    return found - {MERGE_CONTEXT}
+
+
+def checks_green(row, required=None):
     latest = {}
     for item in row.get("statusCheckRollup") or []:
         name = (item.get("name") or item.get("context") or "") if isinstance(item, dict) else ""
@@ -260,6 +276,10 @@ def checks_green(row):
         moment = next((str(item[key]) for key in ("completedAt", "startedAt", "createdAt") if item.get(key) and not str(item[key]).startswith("0001")), "")
         if name not in latest or moment >= latest[name][0]:
             latest[name] = (moment, (item.get("conclusion") or item.get("state") or "").upper())
+    if required is not None:
+        if not required <= set(latest):
+            return False
+        latest = {name: value for name, value in latest.items() if name in required}
     return all(result in ("SUCCESS", "NEUTRAL", "SKIPPED") for _, result in latest.values())
 
 
@@ -299,7 +319,8 @@ def main(argv=None):
         print(json.dumps({"ok": False, "error": str(exc)}), flush=True)
         return 1
     armed = {row["number"] for row in rows if row.get("autoMergeRequest") and row.get("baseRefName") == default_branch}
-    green = {row["number"] for row in rows if checks_green(row)}
+    required = required_contexts(default_branch)
+    green = {row["number"] for row in rows if checks_green(row, required)}
     judged, queue, swept = {}, list(numbers), not args.pr
 
     def run(number, quiet=False):

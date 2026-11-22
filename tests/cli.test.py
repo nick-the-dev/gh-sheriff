@@ -232,17 +232,21 @@ class ProjectInstallTests(unittest.TestCase):
 
 
 WORKFLOW_FILES = {
-    "ci.yml": "name: CI\non:\n  pull_request:\n    branches: [main]\n  push:\n",
-    "inline.yml": "name: Inline\non: [push, pull_request]\n",
-    "target.yml": "name: Target\non:\n  - pull_request_target\n",
-    "quoted.yml": "name: 'Tests: unit # and \"more\" it''s'\n\"on\":\n  pull_request: {}\n",
-    "colon.yml": 'name: "Build: x # y"\non:\n  pull_request:\n',
-    "unnamed.yml": "on:\n  pull_request:\n",
-    "push-only.yml": "name: Deploy\non:\n  push:\n  workflow_run:\n    workflows: [pull_request]\n",
-    "review-only.yml": "name: Review Bot\non:\n  pull_request_review:\n  # pull_request:\n",
-    "sheriff.yml": "name: Sheriff\non:\n  pull_request:\n",
-    "sheriff-relay.yml": "name: Sheriff Relay\non:\n  pull_request:\n",
+    "ci.yml": "name: CI\non:\n  pull_request:\n    branches: [main]\n  push:\njobs:\n  build:\n    runs-on: x\n",
+    "inline.yml": "name: Inline\non: [push, pull_request]\njobs:\n  lint:\n    name: Lint\n    runs-on: x\n",
+    "target.yml": "name: Target\non:\n  - pull_request_target\njobs:\n  t:\n    name: Target job\n",
+    "quoted.yml": "name: 'Tests: unit # and \"more\" it''s'\n\"on\":\n  pull_request: {}\njobs:\n  unit:\n    name: \"Unit: a # b\"\n",
+    "colon.yml": 'name: "Build: x # y"\non:\n  pull_request:\njobs:\n  b:\n    name: Backend Tests\n',
+    "unnamed.yml": "on:\n  pull_request:\njobs:\n  Unnamed Job:\n    runs-on: x\n".replace("Unnamed Job", "unnamed-job"),
+    "matrix.yml": "name: Matrix\non:\n  pull_request:\njobs:\n  m:\n    name: Matrix job\n    strategy:\n      matrix:\n        v: [1]\n",
+    "templated.yml": "name: Templated\non:\n  pull_request:\njobs:\n  t:\n    name: T ${{ matrix.v }}\n",
+    "optional.yml": "name: Optional\non:\n  pull_request:\njobs:\n  o:\n    name: Optional job\n",
+    "push-only.yml": "name: Deploy\non:\n  push:\n  workflow_run:\n    workflows: [pull_request]\njobs:\n  Lint:\n    runs-on: x\n",
+    "review-only.yml": "name: Review Bot\non:\n  pull_request_review:\n  # pull_request:\njobs:\n  Lint:\n    runs-on: x\n",
+    "sheriff.yml": "name: Sheriff\non:\n  pull_request:\njobs:\n  Lint:\n    runs-on: x\n",
+    "sheriff-relay.yml": "name: Sheriff Relay\non:\n  pull_request:\njobs:\n  relay:\n    runs-on: x\n",
 }
+REQUIRED = {"build", "Lint", "Target job", "Unit: a # b", "Backend Tests", "unnamed-job", "Matrix job", "T ${{ matrix.v }}", "Review", "Merge gate"}
 
 
 def fake_repo_workflows(files):
@@ -258,10 +262,24 @@ class CiWorkflowTests(unittest.TestCase):
     def names(self):
         listing, remote = fake_repo_workflows(WORKFLOW_FILES)
         with listing, remote:
-            return cli.pr_workflow_names("o/r", "main")
+            return cli.pr_workflow_names("o/r", "main", REQUIRED)
 
-    def test_the_installer_lists_the_pull_request_workflows_by_name_without_sheriffs_own(self):
+    def test_the_installer_lists_only_pull_request_workflows_with_a_required_job_by_literal_name(self):
         self.assertEqual(self.names(), ["CI", "Build: x # y", "Inline", "Tests: unit # and \"more\" it's", "Target", ".github/workflows/unnamed.yml"])
+
+    def test_without_readable_required_checks_the_installer_lists_none(self):
+        listing, remote = fake_repo_workflows(WORKFLOW_FILES)
+        with listing, remote:
+            self.assertEqual(cli.pr_workflow_names("o/r", "main", None), [])
+            self.assertEqual(cli.pr_workflow_names("o/r", "main", set()), [])
+
+    def test_the_required_contexts_come_from_the_branch_rules_and_a_failed_read_gives_none(self):
+        rules = [{"type": "pull_request"}, {"type": "required_status_checks", "parameters": {"required_status_checks": [{"context": "Tests"}, {"context": "CI Policy"}]}}]
+        with mock.patch.object(cli, "gh_json", return_value=rules) as read:
+            self.assertEqual(cli.required_contexts("o/r", "main"), {"Tests", "CI Policy"})
+        self.assertEqual(read.call_args[0][0], ["api", "repos/o/r/rules/branches/main"])
+        with mock.patch.object(cli, "gh_json", side_effect=cli.SheriffError("403")):
+            self.assertIsNone(cli.required_contexts("o/r", "main"))
 
     def rendered(self, names):
         return cli.render_template((ROOT / "templates/sheriff.yml").read_text(), names)
@@ -287,6 +305,8 @@ class CiWorkflowTests(unittest.TestCase):
             condition = block[block.index("    if:"):]
             with self.subTest(job=job):
                 self.assertIn("github.event.workflow_run.name == 'Sheriff Relay'", condition)
+        state = text[text.index("\n  state:\n"):text.index("\n    runs-on:", text.index("\n  state:\n"))]
+        self.assertIn("github.event.workflow_run.name == 'Sheriff Relay'", state)
         gate = text[text.index("\n  gate:\n"):text.index("\n  reserve:\n")]
         self.assertNotIn("workflow_run.name", gate)
         self.assertIn("join(github.event.workflow_run.pull_requests.*.number", gate)
@@ -299,7 +319,7 @@ class CiWorkflowTests(unittest.TestCase):
 
     def test_the_install_commit_carries_the_rendered_trigger_file(self):
         listing, remote = fake_repo_workflows({"ci.yml": WORKFLOW_FILES["ci.yml"]})
-        with listing, remote, mock.patch.object(cli, "template_text", side_effect=lambda name: (ROOT / "templates" / name).read_text()):
+        with listing, remote, mock.patch.object(cli, "required_contexts", return_value={"build"}), mock.patch.object(cli, "template_text", side_effect=lambda name: (ROOT / "templates" / name).read_text()):
             files = cli.wanted_trigger_files({"repo": "o/r", "branch": "main"})
         self.assertEqual(self.workflows_list(files["sheriff.yml"]), ["Sheriff Relay", "CI"])
         self.assertEqual(files["sheriff-relay.yml"], (ROOT / "templates/sheriff-relay.yml").read_text())

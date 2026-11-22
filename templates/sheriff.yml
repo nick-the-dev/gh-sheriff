@@ -9,8 +9,8 @@ on:
   issue_comment: # zizmor: ignore[dangerous-triggers] runs the default branch's copy; no pull request code runs
     types: [created, edited, deleted]
   workflow_run: # zizmor: ignore[dangerous-triggers] runs the default branch's copy; pull request files are read as data
-    # gh sheriff install adds this repository's pull request workflows next to the relay. Their completion re-runs
-    # the gate job only; a review starts only from the relay (the jobs below check the workflow's name).
+    # gh sheriff install adds the pull request workflows that hold a required check next to the relay. Their
+    # completion re-runs the gate job only; the other jobs run only from the relay (they check the workflow's name).
     workflows: ["Sheriff Relay"]
     types: [completed]
   schedule:
@@ -169,7 +169,10 @@ jobs:
 
   state:
     name: Sync work stages
-    if: github.event_name != 'issue_comment' && vars.SHERIFF_WORK_STATE == 'on'
+    if: >-
+      github.event_name != 'issue_comment' &&
+      (github.event_name != 'workflow_run' || github.event.workflow_run.name == 'Sheriff Relay') &&
+      vars.SHERIFF_WORK_STATE == 'on'
     runs-on: ${{ vars.SHERIFF_RUNS_ON || 'ubuntu-latest' }}
     timeout-minutes: 15
     permissions:

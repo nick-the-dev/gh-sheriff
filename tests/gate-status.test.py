@@ -199,13 +199,17 @@ def row(number, armed=False, base="main", rollup=()):
 
 
 class SerialMergeTests(unittest.TestCase):
-    def run_main(self, args, rows, blocked=()):
+    def run_main(self, args, rows, blocked=(), rules=status.GateError("unreadable")):
         posted, judged = {}, []
 
         def fake_gh_json(args):
             if args[0] == "pr" and args[1] == "view":
                 number = int(args[2])
                 return {"state": "OPEN", "headRefOid": str(number % 10) * 40, "baseRefName": "main"}
+            if args[:2] == ["api", "repos/{owner}/{repo}/rules/branches/main"]:
+                if isinstance(rules, Exception):
+                    raise rules
+                return list(rules)
             return []
 
         def fake_pages(path):
@@ -237,6 +241,23 @@ class SerialMergeTests(unittest.TestCase):
         self.assertEqual(posted[2][0], "success")
         self.assertEqual(posted[3], ("pending", "one merge per deploy: waiting for #2"))
         self.assertEqual(posted[4], ("pending", "one merge per deploy: waiting for #2"))
+
+    def test_only_the_required_checks_decide_whether_an_armed_pull_request_may_lead(self):
+        required = [{"type": "required_status_checks", "parameters": {"required_status_checks": [{"context": "Tests"}, {"context": "Merge gate"}]}}]
+        tests_ok = {"__typename": "CheckRun", "name": "Tests", "status": "COMPLETED", "conclusion": "SUCCESS"}
+        optional_failed = {"__typename": "CheckRun", "name": "Docs Build", "status": "COMPLETED", "conclusion": "FAILURE"}
+        tests_pending = {"__typename": "CheckRun", "name": "Tests", "status": "IN_PROGRESS", "conclusion": ""}
+        code, posted, _ = self.run_main([], [row(2, True, rollup=[tests_ok, optional_failed])], rules=required)
+        self.assertEqual(posted[2][0], "success")
+        code, posted, _ = self.run_main([], [row(2, True, rollup=[tests_pending, optional_failed])], rules=required)
+        self.assertEqual(posted[2], ("pending", "waiting for its checks before merging"))
+        code, posted, _ = self.run_main([], [row(2, True, rollup=[optional_failed])], rules=required)
+        self.assertEqual(posted[2][0], "pending")
+
+    def test_an_unreadable_rules_endpoint_falls_back_to_the_whole_rollup(self):
+        optional_failed = {"__typename": "CheckRun", "name": "Docs Build", "status": "COMPLETED", "conclusion": "FAILURE"}
+        code, posted, _ = self.run_main([], [row(2, True, rollup=[optional_failed])], rules=status.GateError("403"))
+        self.assertEqual(posted[2], ("pending", "waiting for its checks before merging"))
 
     def test_a_blocked_lowest_armed_pull_request_does_not_hold_the_next(self):
         code, posted, _ = self.run_main([], [row(2, True), row(3, True), row(4, True)], blocked=(2,))
