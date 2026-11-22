@@ -22,6 +22,7 @@ _PLAN_SPEC.loader.exec_module(planner)
 
 MERGE_CONTEXT = "Merge gate"
 ACK_RE = re.compile(r"<!--\s*sheriff-ack\s*-->")
+COMMAND_RE = re.compile(r"\s*/sheriff (?:review|plan|replan\s+\S.*)\s*", re.S)
 TRANSIENT = ("has not concluded", "production does not serve the default branch", "no deploy run for the default branch",
              "needs a Sheriff", "could not read the plan")
 DESCRIPTION_LIMIT = 140
@@ -114,7 +115,7 @@ def unanswered(comments, listed):
     acked = max(acks) if acks else None
     pending = []
     for comment in comments:
-        if acknowledger(comment, listed):
+        if acknowledger(comment, listed) or COMMAND_RE.fullmatch(text(comment)):
             continue
         moment = active(comment)
         if moment is not None and acked is not None and moment < acked:

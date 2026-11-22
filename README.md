@@ -58,7 +58,7 @@ flowchart TB
 3. If the cheap review is clean, Claude Opus reviews the same diff.
 4. The `Merge gate` check passes when these hold:
    - the task issue has a current Sheriff plan, if planning is on;
-   - every comment from a person has an agent reply;
+   - every comment from a person has an agent reply (a comment that is only a Sheriff command, such as `/sheriff review`, needs none);
    - production is healthy, if you configured a health check.
 
    If several pull requests have auto-merge on, only the lowest-numbered one that would pass gets a green `Merge gate`.

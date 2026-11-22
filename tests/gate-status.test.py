@@ -41,6 +41,12 @@ class AcknowledgementTests(unittest.TestCase):
         marked = comment("owner", "Checkpoint\n<!-- sheriff-ack -->", "2026-11-21T10:00:00Z")
         self.assertEqual(status.merge_status(7, [marked], [], NOBODY, "")[0], "failure")
 
+    def test_a_persons_sheriff_command_needs_no_agent_reply(self):
+        for body in ("/sheriff review", " /sheriff plan ", "/sheriff replan the cache is shared"):
+            with self.subTest(body=body):
+                self.assertEqual(status.merge_status(7, [comment("owner", body, "2026-11-21T10:00:00Z")], [], NOBODY, "")[0], "success")
+        self.assertEqual(status.merge_status(7, [comment("owner", "/sheriff review please, why did it fail?", "2026-11-21T10:00:00Z")], [], NOBODY, "")[0], "failure")
+
     def test_bots_never_block(self):
         rows = [comment("gitguardian[bot]", "scan", "2026-11-21T10:00:00Z", kind="Bot")]
         self.assertEqual(status.merge_status(7, rows, [], NOBODY, "")[0], "success")
