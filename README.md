@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/sheriff.png" alt="Sheriff" width="128"></p>
+
 # Sheriff
 
 A GitHub CLI extension that reviews every pull request with AI in CI, and only lets it merge when the review passes.
