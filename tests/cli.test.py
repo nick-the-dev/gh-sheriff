@@ -107,7 +107,7 @@ class TaskWiringTests(unittest.TestCase):
     def test_install_and_doctor_take_the_work_state_options(self):
         with mock.patch.object(cli, "install", side_effect=lambda args: self.assertEqual((args.no_work_state, args.project_name), (True, "Board"))):
             cli.main(["install", "--no-work-state", "--project-name", "Board"])
-        with mock.patch.object(cli, "doctor", side_effect=lambda args: self.assertEqual(args.project_name, cli.PROJECT_NAME) or 0):
+        with mock.patch.object(cli, "doctor", side_effect=lambda args: self.assertIsNone(args.project_name) or 0):
             cli.main(["doctor"])
 
 
@@ -182,7 +182,7 @@ class ProjectInstallTests(unittest.TestCase):
             if "createProjectV2IssueField" in query:
                 return {"createProjectV2IssueField": {"projectV2Field": {"databaseId": 50 + len(calls), "name": variables["input"]["issueFieldId"][3:], "isIssueField": True}}}
             if "createProjectV2(" in query:
-                return {"createProjectV2": {"projectV2": {"id": "P2", "number": 9, "title": "Main project", "url": "u"}}}
+                return {"createProjectV2": {"projectV2": {"id": "P2", "number": 9, "title": "r work", "url": "u"}}}
             if "projectsV2(first" in query:
                 return {"repositoryOwner": {"projectsV2": {"nodes": projects}}}
             if "node(id" in query:
@@ -191,11 +191,11 @@ class ProjectInstallTests(unittest.TestCase):
         fields_repo = repository(["Stage", "Verify by", "Next action"], types, info["kind"])
         with mock.patch.object(cli.WORK, "gql", fake), mock.patch.object(cli, "gh_json", lambda args, stdin=None: posted.append((args, json.loads(stdin)))), \
                 mock.patch("sys.stdout", out):
-            project = cli.ensure_project(info, "Main project", fields_repo)
+            project = cli.ensure_project(info, "r work", fields_repo)
         return project, calls, posted, out.getvalue()
 
     def test_an_existing_project_is_reused_linked_and_given_the_missing_fields_and_views(self):
-        existing = [{"id": "P1", "number": 3, "title": "Main project", "url": "u"}, {"id": "P0", "number": 1, "title": "Main project old", "url": "x"}]
+        existing = [{"id": "P1", "number": 3, "title": "r work", "url": "u"}, {"id": "P0", "number": 1, "title": "r work old", "url": "x"}]
         project, calls, posted, _ = self.run_project(USER, existing, [("Title", False), ("Stage", True)], views=("Ready",))
         markers = [marker for marker, _ in calls]
         self.assertEqual(project["id"], "P1")
@@ -213,19 +213,19 @@ class ProjectInstallTests(unittest.TestCase):
     def test_a_missing_project_is_created_for_the_owner_and_the_repository(self):
         project, calls, posted, _ = self.run_project(ORG, [], [("Stage", True), ("Verify by", True), ("Next action", True)], linked=True, types=("Task", "Decision"))
         created = next(v for m, v in calls if m == "createProjectV2(")
-        self.assertEqual(created["input"], {"ownerId": "O1", "title": "Main project", "repositoryId": "R1"})
+        self.assertEqual(created["input"], {"ownerId": "O1", "title": "r work", "repositoryId": "R1"})
         self.assertNotIn("linkProjectV2ToRepository", [m for m, _ in calls])
         self.assertTrue(all(args[3] == "orgs/o/projectsV2/9/views" for args, _ in posted))
         self.assertEqual(posted[0][1]["filter"], "is:open type:Decision")
 
     def test_everything_present_changes_nothing(self):
         names = [view[0] for view in cli.view_specs(1, "")]
-        project, calls, posted, _ = self.run_project(ORG, [{"id": "P1", "number": 3, "title": "Main project", "url": "u"}],
+        project, calls, posted, _ = self.run_project(ORG, [{"id": "P1", "number": 3, "title": "r work", "url": "u"}],
                                                      [("Stage", True), ("Verify by", True), ("Next action", True)], views=names, linked=True)
         self.assertEqual(([m for m, _ in calls], posted), (["projectsV2(first", "node(id"], []))
 
     def test_a_project_field_of_the_same_name_blocks_the_views(self):
-        project, calls, posted, out = self.run_project(ORG, [{"id": "P1", "number": 3, "title": "Main project", "url": "u"}],
+        project, calls, posted, out = self.run_project(ORG, [{"id": "P1", "number": 3, "title": "r work", "url": "u"}],
                                                        [("Stage", False), ("Verify by", True), ("Next action", True)], linked=True)
         self.assertEqual(posted, [])
         self.assertIn("its own field 'Stage'", out)
@@ -290,10 +290,10 @@ class AutoAddTests(unittest.TestCase):
             if "workflows" in query:
                 return self.workflows(False)
             if "projectsV2" in query:
-                return {"repositoryOwner": {"projectsV2": {"nodes": [{"id": "P1", "title": "Main project", "url": "u"}]}}}
+                return {"repositoryOwner": {"projectsV2": {"nodes": [{"id": "P1", "title": "r work", "url": "u"}]}}}
             return {"repository": repository(["Stage", "Verify by", "Next action"])}
         with mock.patch.object(cli.WORK, "gql", fake):
-            self.assertEqual(cli.work_state_problems(ORG, "Main project"), ["'Auto-add to project' is off on the board: turn it on at u/workflows"])
+            self.assertEqual(cli.work_state_problems(ORG, "r work"), ["'Auto-add to project' is off on the board: turn it on at u/workflows"])
 
 
 class WorkStateDoctorTests(unittest.TestCase):
@@ -301,8 +301,8 @@ class WorkStateDoctorTests(unittest.TestCase):
         def fake(query, variables=None):
             return {"repositoryOwner": {"projectsV2": {"nodes": [{"title": "Other"}]}}} if "projectsV2" in query else {"repository": repository(["Stage"])}
         with mock.patch.object(cli.WORK, "gql", fake):
-            problems = cli.work_state_problems(ORG, "Main project")
-        self.assertEqual(problems, ["no issue field 'Verify by'", "no issue field 'Next action'", "no project 'Main project' owned by o"])
+            problems = cli.work_state_problems(ORG, "r work")
+        self.assertEqual(problems, ["no issue field 'Verify by'", "no issue field 'Next action'", "no project 'r work' owned by o"])
 
     def test_unreadable_projects_name_the_scope(self):
         def fake(query, variables=None):
@@ -310,7 +310,7 @@ class WorkStateDoctorTests(unittest.TestCase):
                 raise cli.WORK.WorkError("INSUFFICIENT_SCOPES")
             return {"repository": repository(["Stage", "Verify by", "Next action"])}
         with mock.patch.object(cli.WORK, "gql", fake):
-            self.assertIn("gh auth refresh -s project", cli.work_state_problems(ORG, "Main project")[0])
+            self.assertIn("gh auth refresh -s project", cli.work_state_problems(ORG, "r work")[0])
 
 
 if __name__ == "__main__":

@@ -113,7 +113,8 @@ gh sheriff install
 3. asks for your reviewers and stores their keys in `sheriff-review`;
 4. opens a pull request adding the two trigger files. Sheriff reviews that pull request, and it merges itself;
 5. turns on auto-merge and creates the `Sheriff` ruleset. Your existing required checks are kept;
-6. sets up work state: three issue fields, a "Main project" board with its views, and Auto-add on the board.
+6. sets up work state: three issue fields, the repository's own board with its views, and Auto-add on the board for
+   that repository. The board is named after the repository: `my-app work` for `my-app` (`--project-name` overrides).
 
 Then check everything with:
 
@@ -273,7 +274,7 @@ The board's views are Needs you, Blocked, Ready, In flight, Awaiting verificatio
 - **Same-user agents.** Agents that run as your own OS user can read whatever that user can, including an admin `gh`
   login. Sheriff closes the sanctioned paths; full isolation needs agents that run as another user or in a sandbox.
 - **Auto-add needs one click.** GitHub has no API to switch on a board's "Auto-add to project". `install` opens the
-  page and waits for you, and `doctor` checks it.
+  page and waits for you to pick the repository, and `doctor` checks it.
 
 ## Development
 

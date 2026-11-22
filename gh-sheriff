@@ -41,7 +41,6 @@ SPEC.loader.exec_module(APP)
 WORK_SPEC = importlib.util.spec_from_file_location("sheriff_work", HOME / "scripts" / "work.py")
 WORK = importlib.util.module_from_spec(WORK_SPEC)
 WORK_SPEC.loader.exec_module(WORK)
-PROJECT_NAME = "Main project"
 FIELD_SPECS = (("Stage", "SINGLE_SELECT", WORK.STAGES), ("Verify by", "SINGLE_SELECT", WORK.VERIFY), ("Next action", "TEXT", ()))
 FIELD_TYPES = {"SINGLE_SELECT": "IssueFieldSingleSelect", "TEXT": "IssueFieldText"}
 OPTION_COLORS = ("GRAY", "BLUE", "PURPLE", "YELLOW", "GREEN", "RED")
@@ -735,7 +734,7 @@ def install(args):
     first_run(info)
     ensure_ruleset(info, app_id, args.yes)
     if not args.no_work_state:
-        if ensure_work_state(info, args.project_name, sys.stdin.isatty() and not args.yes):
+        if ensure_work_state(info, args.project_name or WORK.board_title(info["repo"]), sys.stdin.isatty() and not args.yes):
             set_variable(info["repo"], "SHERIFF_WORK_STATE", "on")
             say("ok  work state is on: pull requests and releases move each task's Stage")
         else:
@@ -796,7 +795,7 @@ def doctor(args):
         if detail.get("enforcement") != "active":
             problems.append("the ruleset is not active")
     if repo_variable(repo, "SHERIFF_WORK_STATE") == "on" and not args.no_work_state:
-        problems += work_state_problems(info, args.project_name)
+        problems += work_state_problems(info, args.project_name or WORK.board_title(repo))
     elif not args.no_work_state:
         say("--  work state is off (repository variable SHERIFF_WORK_STATE is not 'on'); gh sheriff install turns it on")
     for line in problems:
@@ -883,7 +882,7 @@ def main(argv=None):
     install_parser.add_argument("--no-browser", action="store_true", help="print the pages to open instead of opening them")
     install_parser.add_argument("--no-files", action="store_true", help="do not open a pull request with the trigger files; add them yourself")
     install_parser.add_argument("--no-work-state", action="store_true", help="skip the issue fields and the project board")
-    install_parser.add_argument("--project-name", default=PROJECT_NAME, help="title of the account's project board (default: Main project)")
+    install_parser.add_argument("--project-name", help="title of the repository's project board (default: the repository's name plus ' work')")
     models_parser = sub.add_parser("models", help="choose the cheap first-pass and the final reviewer")
     models_parser.add_argument("--repo", help="owner/name (default: the repository in the current folder)")
     models_parser.add_argument("--first-pass", help="provider:model, or '' for none")
@@ -896,7 +895,7 @@ def main(argv=None):
     doctor_parser = sub.add_parser("doctor", help="check that Sheriff is set up correctly")
     doctor_parser.add_argument("--repo", help="owner/name (default: the repository in the current folder)")
     doctor_parser.add_argument("--no-work-state", action="store_true", help="do not check the issue fields and the project board")
-    doctor_parser.add_argument("--project-name", default=PROJECT_NAME, help="title of the account's project board (default: Main project)")
+    doctor_parser.add_argument("--project-name", help="title of the repository's project board (default: the repository's name plus ' work')")
     task_parser = sub.add_parser("task", help="record work as issues whose Stage follows pull requests and releases")
     WORK.add_commands(task_parser)
     args = parser.parse_args(argv)

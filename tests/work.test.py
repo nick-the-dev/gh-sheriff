@@ -533,9 +533,16 @@ class CommandTest(unittest.TestCase):
         self.assertEqual(json.loads(out)["id"], "FIX-LOGIN-PAGE-2")
 
     def test_a_new_task_joins_the_board_when_it_exists(self):
-        with mock.patch.object(work, "board_id", return_value="PB"):
+        with mock.patch.object(work, "board_id", return_value="PB") as board:
             code, calls, out = self.call(["new", "Board task", "--id", "BOARD-1"])
         self.assertEqual((code, calls[-1][1]["input"]["projectV2Ids"], json.loads(out)["on_board"]), (0, ["PB"], True))
+        self.assertEqual(board.call_args[0][0], "r work")
+
+    def test_the_board_is_named_after_the_repository_unless_one_is_given(self):
+        self.assertEqual(work.board_title("acme/shop-api"), "shop-api work")
+        with mock.patch.object(work, "board_id", return_value=None) as board:
+            self.call(["new", "Board task", "--id", "BOARD-1", "--project", "Team board"])
+        self.assertEqual(board.call_args[0][0], "Team board")
 
     def test_a_decision_without_the_type_gets_the_label_and_no_stage(self):
         code, calls, _ = self.call(["new", "Pick a database", "--id", "ASK-DB", "--type", "Decision"])

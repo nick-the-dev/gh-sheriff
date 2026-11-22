@@ -466,6 +466,10 @@ BOARD_QUERY = """query($login:String!,$title:String!){repositoryOwner(login:$log
 ADD_ITEM = """mutation($project:ID!,$content:ID!){addProjectV2ItemById(input:{projectId:$project,contentId:$content}){item{id}}}"""
 
 
+def board_title(repo):
+    return repo.split("/", 1)[1] + " work"
+
+
 def board_id(title):
     try:
         owner = gql(BOARD_QUERY, {"login": REPO.split("/")[0], "title": title}).get("repositoryOwner") or {}
@@ -503,7 +507,7 @@ def new_task(known, args):
         payload["issueTypeId"] = known["types"][args.type]
     else:
         payload["labelIds"] = [label_id(args.type.lower())]
-    board = board_id(args.project)
+    board = board_id(args.project or board_title(REPO))
     if board:
         payload["projectV2Ids"] = [board]
     made = gql(CREATE_MUTATION, {"input": payload})["createIssue"]["issue"]
@@ -592,7 +596,7 @@ def add_commands(parser):
     new.add_argument("--type", choices=TYPES, default="Task")
     new.add_argument("--verify", choices=VERIFY, default="Live check", help="how the work is verified (default: Live check)")
     new.add_argument("--body-file", help="the issue body; - reads standard input")
-    new.add_argument("--project", default="Main project", help="the board the task joins (default: Main project)")
+    new.add_argument("--project", help="the board the task joins (default: the repository's name plus ' work')")
     change = sub.add_parser("set", parents=[common], help="set what pull requests and releases cannot show")
     change.add_argument("task", help="task id or #issue number")
     change.add_argument("--stage", choices=STAGES)
