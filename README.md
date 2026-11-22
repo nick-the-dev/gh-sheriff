@@ -100,6 +100,26 @@ It does the following:
 6. Adds three issue fields to your account and creates a GitHub Projects board named `<repo> work`. Skip this with
    `--no-work-state`.
 
+## What your agents need
+
+Sheriff reports through check runs, commit statuses and pull request reviews. The identity your agents push with
+(a GitHub App, a bot account or a fine-grained token) needs these repository permissions to work through that loop
+on their own:
+
+| Permission | Why |
+|---|---|
+| Contents: read and write | Push branches |
+| Pull requests: read and write | Open pull requests, turn on auto-merge, read Sheriff's review |
+| Issues: read and write | Comment on task issues and reply to people |
+| Checks: read | Read the `Review` check run and why it failed. Without it an agent cannot see Sheriff's verdict |
+| Commit statuses: read | Read `Merge gate` and why it is pending |
+| Actions: read and write | Read CI logs, and re-run a flaky job instead of pushing an empty commit |
+| Workflows: read and write | Push changes under `.github/workflows/`. GitHub refuses those pushes without it |
+| Projects: read and write | Only if your agents move items on the work board themselves (organisation boards) |
+
+None of these let an agent merge on its own: the `Sheriff` ruleset still requires `Review` and `Merge gate`, which only
+Sheriff's App can post.
+
 ## Reviewers
 
 Reviews run on subscriptions, not on pay-per-token API keys.
