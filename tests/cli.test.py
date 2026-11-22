@@ -292,6 +292,10 @@ class InstallationTests(unittest.TestCase):
             cli.ensure_installed(self.ORG, None, None, wait=False)
         self.assertIn("/organizations/acme/settings/installations/9", str(raised.exception))
 
+    def test_an_unreadable_repository_list_leaves_the_check_to_the_first_run(self):
+        with mock.patch.object(cli, "gh_json", side_effect=[self.INSTALLATIONS, cli.SheriffError("403")]), mock.patch("builtins.print"):
+            cli.ensure_installed(self.ORG, None, None, wait=False)
+
     def test_a_covered_repository_passes(self):
         with mock.patch.object(cli, "gh_json", side_effect=[self.INSTALLATIONS, [{"repositories": [{"full_name": "acme/web"}]}]]), \
              mock.patch("builtins.print"):

@@ -265,7 +265,10 @@ def app_installation(info, slug):
         return None, False
     if found.get("repository_selection") == "all":
         return found, True
-    repos = flat_pages(gh_json(["api", "--paginate", "--slurp", "/user/installations/" + str(found["id"]) + "/repositories"]))
+    try:
+        repos = flat_pages(gh_json(["api", "--paginate", "--slurp", "/user/installations/" + str(found["id"]) + "/repositories"]))
+    except SheriffError:
+        return found, None
     return found, any(repo.get("full_name") == info["repo"] for page in repos for repo in (page.get("repositories") or []))
 
 
@@ -281,6 +284,9 @@ def ensure_installed(info, app_id, pem, wait=True):
         installation, covered = app_installation(info, slug)
         if covered:
             say("ok  " + slug + " is installed on " + repo)
+            return
+        if covered is None:
+            say("ok  " + slug + " is installed on selected repositories; the first Sheriff run checks that " + repo + " is one")
             return
         page = installation_page(info, installation) if installation else "https://github.com/apps/" + slug + "/installations/new"
         owner_note = " (an organisation owner has to do this)" if info["kind"] == "Organization" else ""
