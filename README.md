@@ -2,7 +2,7 @@
 
 **Agents code. The Sheriff decides what merges.**
 
-Sheriff is a GitHub-native rule layer for teams where AI agents (any harness: Claude Code, Codex, DSH, LobeHub, a
+Sheriff is a GitHub-native rule layer for teams where AI agents (any harness: Claude Code, Codex, LobeHub, a
 person) open pull requests. It works the same whatever runs the agents, because everything it does lives in GitHub:
 
 - **Independent review, cheap first.** Each new head of a pull request into the default branch gets a cheap
@@ -99,10 +99,12 @@ the link. `--no-work-state` skips this step, and `gh sheriff doctor` checks the 
 
 ## Acknowledging a comment
 
-A comment from a person holds `Merge gate` until an agent answers it with a comment whose last two lines are:
+A comment from a person holds `Merge gate` until an agent (a bot, or a login in `SHERIFF_ACK_AUTHORS`) answers it with
+a comment whose last line is:
 
-    <!-- lane-ack -->
-    <!-- dsh-agent -->
+    <!-- sheriff-ack -->
+
+`gh sheriff task reply` adds it for you.
 
 ## Limits
 

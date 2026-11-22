@@ -14,8 +14,7 @@ import urllib.error
 import urllib.request
 
 MERGE_CONTEXT = "Merge gate"
-AGENT_MARKER = "<!-- dsh-agent -->"
-ACK_RE = re.compile(r"<!--\s*lane-ack\s*-->")
+ACK_RE = re.compile(r"<!--\s*sheriff-ack\s*-->")
 TRANSIENT = ("has not concluded", "production does not serve the default branch", "no deploy run for the default branch")
 DESCRIPTION_LIMIT = 140
 
@@ -98,9 +97,7 @@ def lines_of(body):
 
 def trailer(body, pattern):
     lines = lines_of(body)
-    if len(lines) < 2 or lines[-1].lower() != AGENT_MARKER.lower():
-        return None
-    return pattern.fullmatch(lines[-2])
+    return pattern.fullmatch(lines[-1]) if lines else None
 
 
 def unanswered(comments, listed):

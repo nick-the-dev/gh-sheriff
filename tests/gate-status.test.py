@@ -14,7 +14,7 @@ SPEC.loader.exec_module(status)
 HEAD = "a" * 40
 OLD = "b" * 40
 NOBODY = ()
-ACK = "Answered.\n<!-- lane-ack -->\n<!-- dsh-agent -->"
+ACK = "Answered.\n<!-- sheriff-ack -->"
 
 
 def comment(author, body, at, kind="User"):
@@ -37,7 +37,7 @@ class AcknowledgementTests(unittest.TestCase):
         self.assertEqual(status.merge_status(7, [owner, ack], [], ("someone",), "")[0], "success")
 
     def test_the_agent_marker_no_longer_hides_a_persons_comment(self):
-        marked = comment("owner", "Checkpoint\n<!-- dsh-agent -->", "2026-11-21T10:00:00Z")
+        marked = comment("owner", "Checkpoint\n<!-- sheriff-ack -->", "2026-11-21T10:00:00Z")
         self.assertEqual(status.merge_status(7, [marked], [], NOBODY, "")[0], "failure")
 
     def test_bots_never_block(self):
@@ -52,7 +52,7 @@ class AcknowledgementTests(unittest.TestCase):
 
     def test_the_ack_must_be_the_comments_trailer(self):
         owner = comment("owner", "Why?", "2026-11-21T10:00:00Z")
-        quoted = comment("agent[bot]", "<!-- lane-ack -->\n<!-- dsh-agent -->\nmore text", "2026-11-21T11:00:00Z", kind="Bot")
+        quoted = comment("agent[bot]", "<!-- sheriff-ack -->\nmore text", "2026-11-21T11:00:00Z", kind="Bot")
         self.assertEqual(status.merge_status(7, [owner, quoted], [], NOBODY, "")[0], "failure")
 
 
