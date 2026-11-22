@@ -231,13 +231,16 @@ def existing_app_key(info, slug):
     return app_id, key_from_downloads(slug, since)
 
 
-def ensure_gate_app(info, force_new_key=False):
+def ensure_gate_app(info, force_new_key=False, interactive=True):
     repo, slug = info["repo"], slug_for(info["owner"])
     have = env_secret_names(repo)
     if {"SHERIFF_APP_ID", "SHERIFF_APP_KEY_B64"} <= have and not force_new_key:
         app_id = known_app_id(slug)
         say("ok  gate App secrets are in the '" + ENVIRONMENT + "' environment" + (" (App " + str(app_id) + ")" if app_id else ""))
         return app_id, None
+    if not interactive:
+        raise SheriffError("the '" + ENVIRONMENT + "' environment of " + repo + " has no key for the gate App " + slug +
+                           ": run gh sheriff install in a terminal without --yes once; it walks you through adding one")
     exists = known_app_id(slug) is not None or (input("Does a GitHub App named " + slug + " already exist? [y/N] ").strip().lower() == "y")
     app_id, pem = existing_app_key(info, slug) if exists else create_gate_app(info)
     set_env_secret(repo, "SHERIFF_APP_ID", str(app_id))
@@ -756,7 +759,7 @@ def install(args):
     say("Sheriff for " + info["repo"] + " (" + ("organisation" if info["kind"] == "Organization" else "personal account") + ", default branch " + info["branch"] + ")")
     ensure_environment(info)
     ensure_environment(info, REVIEW_ENVIRONMENT)
-    app_id, pem = ensure_gate_app(info, args.new_key)
+    app_id, pem = ensure_gate_app(info, args.new_key, sys.stdin.isatty() and not args.yes)
     app_id = app_id or known_app_id(slug_for(info["owner"]))
     if app_id:
         set_variable(info["repo"], "SHERIFF_APP_ID", str(app_id))

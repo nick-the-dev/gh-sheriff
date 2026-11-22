@@ -274,6 +274,14 @@ class InstallCommitTests(unittest.TestCase):
         self.assertEqual(verify.call_args[0][2], "commit1")
 
 
+class GateKeyTests(unittest.TestCase):
+    def test_a_missing_key_fails_fast_when_nobody_can_answer(self):
+        with mock.patch.object(cli, "env_secret_names", return_value=set()), mock.patch("builtins.input", side_effect=AssertionError("no prompt")), \
+             mock.patch("builtins.print"), self.assertRaises(cli.SheriffError) as raised:
+            cli.ensure_gate_app({"repo": "acme/web", "owner": "acme", "kind": "Organization"}, False, interactive=False)
+        self.assertIn("without --yes", str(raised.exception))
+
+
 class InstallationTests(unittest.TestCase):
     ORG = {"owner": "acme", "repo": "acme/web", "kind": "Organization"}
     INSTALLATIONS = [{"installations": [{"id": 9, "app_slug": "acme-sheriff", "repository_selection": "selected"}]}]
