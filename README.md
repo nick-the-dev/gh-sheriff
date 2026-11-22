@@ -28,7 +28,7 @@ gh sheriff install
 flowchart TB
     subgraph REVIEW["Review every push"]
         direction LR
-        A["Agent pushes"] --> B["Cheap AI review"] -->|clean| C["Opus review"]
+        A["Agent pushes"] --> B["Cheap AI review"] -->|clean| C["Smart AI review"]
         B -->|problem| X["Agent fixes it"]
         C -->|problem| X
         X --> A
