@@ -67,17 +67,28 @@ def bare(login):
     return str(login or "").removesuffix("[bot]")
 
 
-def reviewed(head, key, slug):
+def verdict_stage(check):
+    output = check.get("output") or {}
+    try:
+        stage = (json.loads(output.get("text") or "{}") or {}).get("stage")
+    except (ValueError, AttributeError):
+        stage = None
+    found = re.search(r"\((first|final|budget|reuse), ", str(output.get("title") or ""))
+    return stage or (found.group(1) if found else "")
+
+
+def verdict_stages(head, key, slug):
     try:
         data = gh_json(["api", "repos/{owner}/{repo}/commits/" + head + "/check-runs?check_name=" + CHECK_NAME + "&per_page=100"])
     except ReviewError as exc:
         print("::warning title=Sheriff review::cannot read earlier Review check runs (" + str(exc)[:160] + "); reviewing anyway", flush=True)
-        return False
-    for check in (data or {}).get("check_runs", []):
-        app = check.get("app") or {}
-        if app.get("slug") == slug and check.get("status") == "completed" and check.get("external_id") == key:
-            return True
-    return False
+        return set()
+    return {verdict_stage(check) for check in (data or {}).get("check_runs", [])
+            if (check.get("app") or {}).get("slug") == slug and check.get("status") == "completed" and check.get("external_id") == key}
+
+
+def reviewed(head, key, slug):
+    return bool(verdict_stages(head, key, slug) - {"budget"})
 
 
 def pr_plan(view, slug):
@@ -214,7 +225,8 @@ def review_run(pr, head, base_sha, workdir, prompt, first_spec, final_spec, firs
         return dict(record, stage="final", model=result["model"], verdict=verdict, body=body)
     return dict(record, stage="budget", model="none", verdict="blocked",
                 body="Review budget used: " + str(counts["first"]) + " cheap and " + str(counts["final"]) + " final reviews on this "
-                     "pull request. A person decides now: comment `/sheriff review` to allow one more final review, then push.")
+                     "pull request. A person decides now: comment `/sheriff review` to allow one more final review. It runs on the next push, "
+                     "or start it at once with `gh workflow run sheriff.yml -f pr=" + str(pr) + " -f review=true`.")
 
 
 def reserve(args):
@@ -245,7 +257,8 @@ def reserve(args):
             known = planner.closing(view.get("closingIssuesReferences"), os.environ["GH_REPO"])
             return output(skip="could not read the plan on #" + str(known[0] if known else args.pr), **dict(empty, head=head, base=base_sha))
     empty = dict(empty, head=head, base=base_sha, plan_issue=plan_issue, plan_version=plan_version, plan_id=plan_id)
-    if reviewed(head, planner.review_key(base_sha, plan_version, plan_id), slug):
+    stages = verdict_stages(head, planner.review_key(base_sha, plan_version, plan_id), slug)
+    if stages - {"budget"}:
         return output(skip="already reviewed at this head and base", **empty)
     listed = tuple(name.strip().lower() for name in (args.unlock_authors or "").split(",") if name.strip())
     counts = history(args.pr, slug, listed)
@@ -255,6 +268,8 @@ def reserve(args):
     steps = plan(counts, first_spec, False, args.first_rounds, args.final_rounds)
     packed = json.dumps(counts, separators=(",", ":"))
     if counts["edited"] or not (steps["first"] or steps["final"]):
+        if "budget" in stages:
+            return output(skip="review budget used at this head", **empty)
         record = review_run(args.pr, head, base_sha, "", "", first_spec, final_spec, args.first_rounds, args.final_rounds, counts, False,
                             plan_version=plan_version, plan_id=plan_id)
         with tempfile.TemporaryDirectory() as folder:

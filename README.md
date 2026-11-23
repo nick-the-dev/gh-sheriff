@@ -86,8 +86,9 @@ or `.cursor/`. Draft pull requests and pull requests into other branches than th
 
 Each pull request gets 3 cheap and 3 smart reviews. After the cheap ones, the smart model reviews alone; after the smart
 ones, `Review` blocks until an admin, a maintainer or a login in `SHERIFF_UNLOCK_AUTHORS` (never the pull request's
-author) comments `/sheriff review`, which allows one more smart review. A review counts once it starts, so cancelling
-or re-running it gives no free retry.
+author) comments `/sheriff review`, which allows one more smart review. It runs on the next push, or at once with
+`gh workflow run sheriff.yml -f pr=<n> -f review=true`. A review counts once it starts, so cancelling or re-running it
+gives no free retry.
 
 ## Requirements
 

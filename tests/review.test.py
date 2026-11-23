@@ -269,6 +269,19 @@ class ReserveTests(unittest.TestCase):
             with self.subTest(other=other):
                 self.assertEqual(self.reserve(checks=[other])[1][-1]["skip"], "")
 
+    def test_a_budget_stop_at_this_head_does_not_block_a_review_a_maintainer_allowed(self):
+        stop = {"app": {"slug": "gate"}, "status": "completed", "external_id": BASE,
+                "output": {"title": "Sheriff review: blocked (budget, none)", "text": json.dumps({"sheriff_usage": 1, "stage": "budget"})}}
+        used = [gate(marker("first")) for _ in range(3)] + [gate(marker("final")) for _ in range(3)]
+        code, outs, gh, writes = self.reserve(checks=[stop], reviews=used, comments=[said("boss")])
+        self.assertEqual((outs[-1]["skip"], writes, len(self.reservations(gh))), ("", [], 1))
+        code, outs, gh, writes = self.reserve(checks=[stop], reviews=used)
+        self.assertEqual((outs[-1]["skip"], writes, self.reservations(gh)), ("review budget used at this head", [], []))
+        legacy = dict(stop, output={"title": "Sheriff review: blocked (budget, none)"})
+        self.assertEqual(self.reserve(checks=[legacy], reviews=used, comments=[said("boss")])[1][-1]["skip"], "")
+        real = dict(stop, output={"title": "Sheriff review: blocked (final, claude-opus-5-5)", "text": json.dumps({"stage": "final"})})
+        self.assertEqual(self.reserve(checks=[real], reviews=used, comments=[said("boss")])[1][-1]["skip"], "already reviewed at this head and base")
+
     def test_a_used_budget_is_published_at_once_and_no_reviewer_runs(self):
         used = [gate(marker("first")) for _ in range(3)] + [gate(marker("final")) for _ in range(3)]
         with mock.patch.object(review.reviewers, "run", side_effect=AssertionError("a reviewer ran")):
