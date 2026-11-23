@@ -43,7 +43,7 @@ NO_PLAN_LABEL = "sheriff:no-plan"
 KEY_SEPARATOR = "/plan-"
 DEFAULT_MODEL = "claude:claude-opus-5-5"
 SECTIONS = ("Priority", "Problem", "Solution space", "Chosen approach", "Tests", "Production check", "Out of scope")
-PRIORITY_LINE = re.compile(r"\**(P[0-3])\b")
+PRIORITY_LINE = re.compile(r"[-*_`>\s]*(P[0-3])(?![0-9A-Za-z])")
 PRIORITY_LABELS = {"P0": ("b60205", "Production is broken or unsafe now"),
                    "P1": ("d93f0b", "A real problem with a workaround, or blocks other work: this week"),
                    "P2": ("fbca04", "A normal fix or improvement (the default)"),
@@ -503,7 +503,8 @@ def apply_priority(number, level, slug):
     present = [name for name in current if name.lower().startswith("priority:")]
     if present:
         setters = {}
-        for event in gh_json(["api", issue + "/events?per_page=100"]) or []:
+        pages = gh_json(["api", "--paginate", "--slurp", issue + "/events?per_page=100"]) or []
+        for event in (event for page in pages if isinstance(page, list) for event in page):
             if isinstance(event, dict) and event.get("event") == "labeled":
                 setters[str((event.get("label") or {}).get("name") or "").lower()] = str((event.get("actor") or {}).get("login") or "")
         if any(setters.get(name.lower(), "") != slug + "[bot]" for name in present):
@@ -513,11 +514,11 @@ def apply_priority(number, level, slug):
         return "same"
     color, description = PRIORITY_LABELS[level]
     run(["gh", "label", "create", wanted, "--color", color, "--description", description, "--force"])
+    if wanted not in present:
+        gh_json(["api", "-X", "POST", issue + "/labels", "-f", "labels[]=" + wanted])
     for name in present:
         if name != wanted:
             gh_json(["api", "-X", "DELETE", issue + "/labels/" + urllib.parse.quote(name, safe="")])
-    if wanted not in present:
-        gh_json(["api", "-X", "POST", issue + "/labels", "-f", "labels[]=" + wanted])
     return "set"
 
 

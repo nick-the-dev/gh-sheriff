@@ -423,6 +423,7 @@ class CommentTests(unittest.TestCase):
 
     def test_priority_is_read_from_the_first_line_of_its_section(self):
         for text, expected in (("## Priority\nP1: blocks the deploy\n## Problem\nx", "P1"), ("## Priority\n\n**P0** — outage", "P0"),
+                               ("## Priority\n`P1: the deploy is blocked`", "P1"), ("## Priority\n- P2: normal", "P2"), ("## Priority\n_P3_: someday", "P3"),
                                ("## Priority\nHigh", None), ("## Priority\np1: x", None), ("## Problem\nx", None)):
             with self.subTest(text=text):
                 self.assertEqual(plan.priority_of(text), expected)
@@ -580,7 +581,7 @@ class PriorityLabelTests(unittest.TestCase):
             if args[-1].endswith("/labels") and len(args) == 2:
                 return [{"name": name} for name in labels]
             if "/events" in args[-1]:
-                return [{"event": "labeled", "label": {"name": name}, "actor": {"login": login}} for name, login in events]
+                return [[{"event": "labeled", "label": {"name": name}, "actor": {"login": login}} for name, login in events]]
             writes.append(args)
             return []
         with mock.patch.object(plan, "gh_json", side_effect=gh), mock.patch.object(plan, "run", side_effect=lambda args, cwd=None: writes.append(args) or ""):
@@ -597,8 +598,25 @@ class PriorityLabelTests(unittest.TestCase):
     def test_sheriffs_own_label_is_replaced_by_a_new_judgement(self):
         result, writes = self.apply(["priority:P2"], [("priority:P2", APP + "[bot]")])
         self.assertEqual(result, "set")
-        self.assertIn(["api", "-X", "DELETE", "repos/{owner}/{repo}/issues/12/labels/priority%3AP2"], writes)
-        self.assertEqual(writes[-1][-1], "labels[]=priority:P1")
+        delete = ["api", "-X", "DELETE", "repos/{owner}/{repo}/issues/12/labels/priority%3AP2"]
+        self.assertIn(delete, writes)
+        add = next(i for i, w in enumerate(writes) if w[-1] == "labels[]=priority:P1")
+        self.assertLess(add, writes.index(delete))
+
+    def test_label_events_are_read_across_pages(self):
+        seen = []
+
+        def gh(args):
+            seen.append(args)
+            if "/events" in args[-1]:
+                return [[{"event": "labeled", "label": {"name": "priority:P2"}, "actor": {"login": APP + "[bot]"}}],
+                        [{"event": "labeled", "label": {"name": "priority:P2"}, "actor": {"login": "boss"}}]]
+            return [{"name": "priority:P2"}]
+        with mock.patch.object(plan, "gh_json", side_effect=gh), mock.patch.object(plan, "run", return_value=""):
+            self.assertEqual(plan.apply_priority(12, "P1", APP), "kept")
+        events = next(a for a in seen if "/events" in a[-1])
+        self.assertIn("--paginate", events)
+        self.assertIn("--slurp", events)
 
     def test_the_same_priority_writes_nothing(self):
         self.assertEqual(self.apply(["priority:P1"], [("priority:P1", APP + "[bot]")]), ("same", []))
