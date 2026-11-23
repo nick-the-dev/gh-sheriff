@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Sheriff plan: the facts the planner shares, namely the comment markers, an issue read with its comments, the
 App's current plan on a task issue, the task issue of a pull request, the pull requests linked to an issue and the
-review keys that bind a review to one plan by its version and comment; who may ask for a plan, the budget, the
-reservation comment that the gate App posts before any model runs, and the same decision rechecked after a post for a
-command that arrived meanwhile; and writing the plan: the issue prepared as data, the read-only model run, and the post
+review keys that bind a review to one plan by its version and comment; who may ask for a plan, the budget, the task
+ID given to a plain issue a person opens, the reservation comment that the gate App posts before any model runs, and
+the same decision rechecked after a post for a command that arrived meanwhile; and writing the plan: the issue prepared as data, the read-only model run, and the post
 that turns the reservation into the plan or a failure note and marks the old version superseded."""
 import argparse
 import datetime
@@ -26,6 +26,11 @@ BUDGET_MARKER = "<!-- sheriff-plan-budget -->"
 PLAN_COMMAND = re.compile(r"^\s*/sheriff plan\s*$")
 REPLAN_COMMAND = re.compile(r"^\s*/sheriff replan\s+(\S[\s\S]*?)\s*$")
 STALE_MINUTES = 30
+NAME_WORDS = 3
+TITLE_MAX = 256
+WORD_LIMIT = 12
+STOP_WORDS = {"a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "in", "into", "is", "it", "of", "on", "or", "our",
+              "should", "the", "this", "to", "we", "when", "with"}
 REASON_LIMIT = 2_000
 FAILURE_LIMIT = 300
 FAILURES_ALLOWED = 2
@@ -90,6 +95,12 @@ def first_line(body):
 def task_id(title):
     found = TASK_TITLE.match(title or "")
     return found.group(1) if found else None
+
+
+def name_task(title, number):
+    words = [w.upper()[:WORD_LIMIT] for w in re.findall(r"[A-Za-z0-9]+", title or "") if w.lower() not in STOP_WORDS][:NAME_WORDS]
+    name = "-".join(words + [str(number)])
+    return name if name[0].isalpha() else "ISSUE-" + name
 
 
 def login_of(actor):
@@ -365,7 +376,13 @@ def reserve(args):
     issue = read_issue(args.issue, gh_json)
     if issue is None:
         return output(skip="issue not found", **empty)
-    decided = decide(issue, slug, make_role(), logins(args.ack_authors), logins(args.unlock_authors), args.rounds, datetime.datetime.now(datetime.timezone.utc), args.event == "opened")
+    role, now, opened = make_role(), datetime.datetime.now(datetime.timezone.utc), args.event == "opened"
+    named = "" if task_id(issue["title"]) or issue["author_bot"] else name_task(issue["title"], issue["number"])
+    candidate = dict(issue, title=(named + ": " + issue["title"])[:TITLE_MAX]) if named else issue
+    decided = decide(candidate, slug, role, logins(args.ack_authors), logins(args.unlock_authors), args.rounds, now, opened)
+    named = named if decided["action"] == "plan" else ""
+    if named:
+        gh_json(["api", "-X", "PATCH", "repos/{owner}/{repo}/issues/" + str(args.issue), "-f", "title=" + candidate["title"]])
     if decided["action"] == "skip":
         return output(skip=decided["why"], **empty)
     if decided["action"] == "budget":
@@ -379,7 +396,8 @@ def reserve(args):
     server, repo, run_id = (os.environ.get(name, "").strip() for name in ("GITHUB_SERVER_URL", "GITHUB_REPOSITORY", "GITHUB_RUN_ID"))
     link = " ([workflow run](" + server + "/" + repo + "/actions/runs/" + run_id + "))" if server and repo and run_id else ""
     version = decided["version"]
-    comment_id = post_comment(args.issue, "<!-- sheriff-plan-start v=" + str(version) + " -->\nSheriff is writing plan v" + str(version) + " for this issue" + link)
+    lead = "Sheriff named this task `" + named + "`. " if named else ""
+    comment_id = post_comment(args.issue, "<!-- sheriff-plan-start v=" + str(version) + " -->\n" + lead + "Sheriff is writing plan v" + str(version) + " for this issue" + link)
     request = json.dumps({"version": version, "reason": decided["reason"], "requester": decided["requester"]}, separators=(",", ":"))
     return output(skip="", version=version, comment_id=comment_id, request=request, app=slug)
 

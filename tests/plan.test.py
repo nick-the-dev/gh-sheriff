@@ -265,6 +265,15 @@ class DecideTests(unittest.TestCase):
         self.assertEqual(decide(task(), opened=True)["version"], 1)
         self.assertEqual(decide(task([note("boss", "/sheriff plan")], author="stranger"), opened=False)["action"], "plan")
 
+    def test_a_plain_title_gets_a_task_id_from_its_words_and_the_issue_number(self):
+        for title, number, expected in (("Fix the login page on mobile", 57, "FIX-LOGIN-PAGE-57"), ("Login broken", 12, "LOGIN-BROKEN-12"),
+                                        ("Почини график", 8, "ISSUE-8"), ("2fa codes expire", 9, "ISSUE-2FA-CODES-EXPIRE-9"),
+                                        ("Internationalization everywhere", 3, "INTERNATIONA-EVERYWHERE-3"), ("", 4, "ISSUE-4")):
+            with self.subTest(title=title):
+                named = plan.name_task(title, number)
+                self.assertEqual(named, expected)
+                self.assertEqual(plan.task_id(named + ": " + title), expected)
+
     def test_a_long_reason_is_cut(self):
         result = decide(task([planned(1), note("boss", "/sheriff replan " + "x" * 5000, "2026-11-22T11:00:00Z")]))
         self.assertEqual(len(result["reason"]), plan.REASON_LIMIT)
@@ -277,6 +286,9 @@ class ReserveTests(unittest.TestCase):
         def fake(args):
             if "/permission" in args[-1]:
                 return {"role_name": ROLES.get(args[-1].split("/")[-2], "write")}
+            if args[:3] == ["api", "-X", "PATCH"]:
+                posts.append({"path": args[3], "title": args[args.index("-f") + 1][6:]})
+                return {"number": 12}
             if args[:3] == ["api", "-X", "POST"]:
                 posts.append({"path": args[3], "body": args[args.index("-f") + 1][5:]})
                 return {"id": 55}
@@ -314,6 +326,27 @@ class ReserveTests(unittest.TestCase):
     def test_without_the_opened_event_a_trusted_authors_issue_is_not_reserved(self):
         code, outs, posts = self.reserve(task(), event="created")
         self.assertEqual((code, posts, outs[-1]["skip"]), (0, [], "waiting for /sheriff plan from a maintainer"))
+
+    def test_a_plain_issue_opened_by_a_trusted_person_is_named_then_reserved(self):
+        code, outs, posts = self.reserve(task(title="Login broken"))
+        self.assertEqual((code, len(posts)), (0, 2))
+        self.assertEqual(posts[0], {"path": "repos/{owner}/{repo}/issues/12", "title": "LOGIN-BROKEN-12: Login broken"})
+        self.assertIn("Sheriff named this task `LOGIN-BROKEN-12`", posts[1]["body"])
+        self.assertIn("Sheriff is writing plan v1 for this issue", posts[1]["body"])
+        self.assertEqual(outs[-1]["version"], 1)
+
+    def test_a_plain_issue_from_an_outsider_or_a_bot_or_a_decision_is_left_alone(self):
+        for issue in (task(title="Login broken", author="stranger"), task(title="Login broken", author="lane[bot]", bot=True),
+                      task(title="Login broken", decision=True), task(title="Login broken", open=False)):
+            with self.subTest(author=issue["author"], decision=issue["decision"], open=issue["open"]):
+                code, outs, posts = self.reserve(issue)
+                self.assertEqual((code, posts), (0, []))
+                self.assertNotEqual(outs[-1]["skip"], "")
+
+    def test_a_maintainers_plan_command_names_a_plain_issue_opened_by_someone_else(self):
+        code, outs, posts = self.reserve(task([note("boss", "/sheriff plan")], title="Login broken", author="stranger"), event="created")
+        self.assertEqual(posts[0]["title"], "LOGIN-BROKEN-12: Login broken")
+        self.assertEqual(outs[-1]["version"], 1)
 
     def test_a_skip_posts_nothing_and_without_the_apps_login_nothing_runs(self):
         self.assertEqual(self.reserve(task([planned(1)]))[2], [])

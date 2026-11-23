@@ -129,7 +129,10 @@ posted by Sheriff's App, with six sections:
 - **Out of scope**: what the task must not touch.
 
 Only task issues are planned: those whose title starts with a task ID (`<ID>: ...` or `<ID> #n: ...`). Decision issues
-and pull requests never are.
+and pull requests never are. An issue a person opens without an ID is named first, when it would be planned: Sheriff
+renames it to `<WORDS>-<number>: <your title>`, three words of the title plus the issue number, so `Login page broken
+on mobile` (#57) becomes `LOGIN-PAGE-BROKEN-57: Login page broken on mobile`, and its start comment says so. Within a
+minute of opening, the issue carries its task ID and "Sheriff is writing plan v1". Issues opened by bots are not renamed.
 
 The plan binds the pull request. `Merge gate` stays pending ("needs a Sheriff plan on #N") until the task issue has a
 current plan, and the review gets the plan and checks the pull request against it. A different approach, files outside
@@ -167,7 +170,7 @@ a fetch is an outbound request.
 switched on, and switching on again after off restarts it. An admin can label a pull request `sheriff:no-plan` for an
 emergency, and the gate says so in its description.
 
-**App permission.** Posting plans needs the App's repository permission Issues: Read and write. Apps created by an
+**App permission.** Posting plans and naming issues need the App's repository permission Issues: Read and write. Apps created by an
 earlier Sheriff only have read. To grant it, open the App's settings, then Permissions, set Repository permissions >
 Issues to Read and write and save. Then accept the new permission request on the installation (an organization owner
 has to). Until then, a new install leaves planning off, and `--plan on` stops with these steps. `gh sheriff doctor`
