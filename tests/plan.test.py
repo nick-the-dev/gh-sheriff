@@ -419,10 +419,18 @@ def reservation(v, id=55):
 
 class CommentTests(unittest.TestCase):
     RECORD = {"issue": 12, "version": 2, "base": BASE, "provider": "claude", "model": "claude-opus-5-5", "ok": True,
-              "text": "\n".join("## " + s + "\nx" for s in plan.SECTIONS), "usage": {"input": 1}, "requester": "lane[bot]"}
+              "text": "\n".join("## " + s + ("\nP2: normal" if s == "Priority" else "\nx") for s in plan.SECTIONS), "usage": {"input": 1}, "requester": "lane[bot]"}
+
+    def test_priority_is_read_from_the_first_line_of_its_section(self):
+        for text, expected in (("## Priority\nP1: blocks the deploy\n## Problem\nx", "P1"), ("## Priority\n\n**P0** — outage", "P0"),
+                               ("## Priority\nHigh", None), ("## Priority\np1: x", None), ("## Problem\nx", None)):
+            with self.subTest(text=text):
+                self.assertEqual(plan.priority_of(text), expected)
 
     def test_check_plan_requires_every_section_and_the_size_limit(self):
         self.assertEqual(plan.check_plan(self.RECORD["text"]), "")
+        self.assertEqual(plan.check_plan(self.RECORD["text"].replace("## Priority\nP2: normal", "## Priority\nHigh")),
+                         "the Priority section must start with P0, P1, P2 or P3")
         self.assertEqual(plan.check_plan(self.RECORD["text"].replace("## Out of scope", "Out of scope")), "missing sections: Out of scope")
         self.assertEqual(plan.check_plan(self.RECORD["text"].replace("## Tests", "### tests")), "")
         self.assertEqual(plan.check_plan(self.RECORD["text"] + "x" * 20_000), "longer than 20000 characters")
@@ -554,7 +562,7 @@ class RunTests(StepTests):
     def test_a_model_error_or_bad_web_setting_is_a_failure_record(self):
         self.assertIn("ended without a result", self.run_plan(error=plan.reviewers.ReviewerError("boom"))["failure"])
         self.assertFalse(self.run_plan(text=CommentTests.RECORD["text"], web="all")["ok"])
-        self.assertEqual(self.run_plan(text="## Problem\nonly")["failure"], "missing sections: Solution space, Chosen approach, Tests, Production check, Out of scope")
+        self.assertEqual(self.run_plan(text="## Problem\nonly")["failure"], "missing sections: Priority, Solution space, Chosen approach, Tests, Production check, Out of scope")
 
     def test_web_tools_reach_only_a_claude_planner_and_the_prompt_is_the_static_file(self):
         self.run_plan(text=CommentTests.RECORD["text"], model="claude:claude-opus-5-5", web="any")
@@ -635,6 +643,14 @@ class PostTests(StepTests):
 
 
 class PromptTests(unittest.TestCase):
+    def test_the_plan_prompt_carries_the_priority_scale(self):
+        flat = " ".join((ROOT / "prompts/plan.md").read_text().split())
+        self.assertIn("## Priority", flat)
+        for sentence in ("Production is broken or unsafe now: users cannot use a core feature, data is lost or wrong, a security hole is open, "
+                         "or trading figures shown to users are wrong.", "A real problem with a workaround, or work that blocks other work. This week.",
+                         "A normal fix or improvement. The default.", "Nice to have, cleanup, someday."):
+            self.assertIn(sentence, flat)
+
     def test_the_plan_and_review_prompts_ask_for_plain_language(self):
         for name, lead in (("plan.md", "Start each section with one sentence"), ("review.md", "Start each finding with one sentence")):
             with self.subTest(prompt=name):

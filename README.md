@@ -117,7 +117,7 @@ It does the following:
 ## Planning
 
 With `SHERIFF_PLAN=on`, Claude Opus writes a plan on each task issue before the work starts. The plan is a comment
-posted by Sheriff's App, with six sections:
+posted by Sheriff's App, with seven sections:
 
 - **Problem**: what is wrong or missing, and why it matters.
 - **Solution space**: the options, with web research where it changes the answer, and why the others were rejected.

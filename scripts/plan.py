@@ -41,7 +41,8 @@ USAGE_MARKER = re.compile(r"<!--\s*sheriff-usage\s+(\{.*\})\s*-->")
 NO_PLAN_LABEL = "sheriff:no-plan"
 KEY_SEPARATOR = "/plan-"
 DEFAULT_MODEL = "claude:claude-opus-5-5"
-SECTIONS = ("Problem", "Solution space", "Chosen approach", "Tests", "Production check", "Out of scope")
+SECTIONS = ("Priority", "Problem", "Solution space", "Chosen approach", "Tests", "Production check", "Out of scope")
+PRIORITY_LINE = re.compile(r"\**(P[0-3])\b")
 PLAN_LIMIT = 20_000
 TITLE_LIMIT = 300
 BODY_LIMIT = 20_000
@@ -241,10 +242,18 @@ def usage_of(body):
     return data if isinstance(data, dict) else None
 
 
+def priority_of(text):
+    section = re.search(r"^#{1,3}\s*Priority\s*$\s*^\s*(\S.*)$", str(text or ""), re.I | re.M)
+    found = PRIORITY_LINE.match(section.group(1)) if section else None
+    return found.group(1) if found else None
+
+
 def check_plan(text):
     missing = [name for name in SECTIONS if not re.search(r"^#{1,3}\s*" + re.escape(name) + r"\s*$", text, re.I | re.M)]
     if missing:
         return "missing sections: " + ", ".join(missing)
+    if not priority_of(text):
+        return "the Priority section must start with P0, P1, P2 or P3"
     return "longer than " + str(PLAN_LIMIT) + " characters" if len(text) > PLAN_LIMIT else ""
 
 

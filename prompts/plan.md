@@ -30,7 +30,18 @@ each section with one sentence that says its point plainly (what is wrong, for w
 detail and the `path:line` references. Explain a term, abbreviation or internal name the first time you use it, or
 leave it out. No filler and no hedging.
 
-Answer with exactly these six sections, in this order, each starting with its `## ` heading line:
+Answer with exactly these seven sections, in this order, each starting with its `## ` heading line:
+
+## Priority
+The first line is the priority, a colon and one plain sentence saying why, like `P1: the deploy is blocked until this is
+fixed`. Judge it from what the issue and the code show, on this scale:
+
+| Priority | Meaning |
+|---|---|
+| P0 | Production is broken or unsafe now: users cannot use a core feature, data is lost or wrong, a security hole is open, or trading figures shown to users are wrong. |
+| P1 | A real problem with a workaround, or work that blocks other work. This week. |
+| P2 | A normal fix or improvement. The default. |
+| P3 | Nice to have, cleanup, someday. |
 
 ## Problem
 What is wrong or missing and why, with `path:line` references to the code that shows it. State what is unclear or
