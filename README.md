@@ -17,8 +17,8 @@
 
 Sheriff is for repositories where AI agents open pull requests. One command sets up:
 
-- a plan from Claude Opus on each task issue, before the work starts (see [Planning](#planning));
-- an AI review on every push. A cheap model goes first, and Claude Opus reviews only if that passes;
+- a plan from a smart model on each task issue, before the work starts (see [Planning](#planning));
+- an AI review on every push. A cheap model goes first, and a smart model reviews only if that passes;
 - a ruleset that blocks merging until the review passes. Admins can't bypass it either;
 - task tracking with GitHub Issues and a GitHub Projects board. Each task's status follows its pull request and your
   deploys.
@@ -38,7 +38,7 @@ gh sheriff install
 flowchart TB
     subgraph PLAN["Plan every task"]
         direction LR
-        I["Task issue opened"] --> P["Opus writes the plan"] --> W["Agent works to the plan"]
+        I["Task issue opened"] --> P["Smart model writes the plan"] --> W["Agent works to the plan"]
         W -->|"plan cannot work"| R["/sheriff replan"] --> P
     end
     subgraph REVIEW["Review every push"]
@@ -61,7 +61,7 @@ flowchart TB
 1. An agent pushes to a pull request.
 2. A cheap model reviews the diff. If it finds a problem, the `Review` check fails and the agent pushes a fix. Changes
    that only touch docs stop here.
-3. If the cheap review is clean, Claude Opus reviews the same diff.
+3. If the cheap review is clean, the smart model reviews the same diff.
 4. The `Merge gate` check passes when these hold:
    - the task issue has a current Sheriff plan and the `Review` was made against that plan version, if planning is on;
    - every comment from a person has an agent reply (a comment that is only a Sheriff command, such as `/sheriff review`, needs none);
@@ -74,7 +74,7 @@ flowchart TB
 6. Your deploy workflow runs. When production serves the merged commit, Sheriff marks the task Released.
 7. Someone checks the change in production and records it with `gh sheriff task verify`. The task becomes Verified.
 
-Each pull request gets 3 cheap and 3 Opus reviews. After that, a maintainer has to comment `/sheriff review` to allow
+Each pull request gets 3 cheap and 3 smart reviews. After that, a maintainer has to comment `/sheriff review` to allow
 one more. A review counts as soon as it starts, so cancelling or re-running it doesn't give a free retry.
 
 ## Requirements
@@ -116,7 +116,7 @@ It does the following:
 
 ## Planning
 
-With `SHERIFF_PLAN=on`, Claude Opus writes a plan on each task issue before the work starts. The plan is a comment
+With `SHERIFF_PLAN=on`, a smart model writes a plan on each task issue before the work starts. The plan is a comment
 posted by Sheriff's App, with seven sections:
 
 - **Priority**: how urgent the task is, with one sentence saying why (see the scale below).
@@ -253,11 +253,15 @@ Sheriff's App can post.
 
 ## Reviewers
 
+Sheriff uses two kinds of model. A cheap model does the first review of every push. A smart model writes the plans and
+does the final review; by default that is Claude Opus (`claude:claude-opus-5-5`). Both are settings, so you can swap
+either one.
+
 Reviews run on subscriptions, not on pay-per-token API keys.
 
 | Subscription | Use it for | Model setting | Key |
 |---|---|---|---|
-| Claude (any plan that includes Claude Code) | The Opus review, or a cheap review with a small model | `claude:claude-opus-5-5`, `claude:claude-haiku-5-5` | `CLAUDE_CODE_OAUTH_TOKEN`, from `claude setup-token` |
+| Claude (any plan that includes Claude Code) | The smart review and the plan, or a cheap review with a small model | `claude:claude-opus-5-5`, `claude:claude-haiku-5-5` | `CLAUDE_CODE_OAUTH_TOKEN`, from `claude setup-token` |
 | [OpenCode Go](https://opencode.ai) | The cheap review | `opencode:opencode-go/deepseek-v4.1-flash`, or any `opencode-go/` model | `OPENCODE_API_KEY` |
 
 Not supported yet:
@@ -265,8 +269,8 @@ Not supported yet:
 - OpenAI or Codex;
 - OpenCode models outside Go.
 
-Run `gh sheriff models` to change reviewers. `gh sheriff stats` shows how much of the review work Opus did and what it
-cost; aim for under 10%.
+Run `gh sheriff models` to change reviewers. `gh sheriff stats` shows how much of the review work the smart model did and
+what it cost; aim for under 10%.
 
 ## Commands
 
@@ -274,7 +278,7 @@ cost; aim for under 10%.
 |---|---|
 | `gh sheriff install` | Set up a repository. Flags: `--repo`, `--first-pass`, `--review-model`, `--plan on\|off`, `--merges serial\|bundle`, `--no-work-state`, `--project-name`, `--no-files`, `--yes` |
 | `gh sheriff doctor` | Check the setup and print what to fix |
-| `gh sheriff models` | Choose the cheap and the Opus reviewer |
+| `gh sheriff models` | Choose the cheap and the smart reviewer |
 | `gh sheriff stats` | Show review and plan usage and cost for recent pull requests |
 | `gh sheriff task new "<title>"` | Create a task issue and add it to the board |
 | `gh sheriff task set <ID>` | Set fields Sheriff can't infer: `--stage Parked`, `--next "..."`, `--verify` |
@@ -290,11 +294,11 @@ All settings are repository variables. All are optional.
 | Variable | Default | Description |
 |---|---|---|
 | `SHERIFF_FIRST_PASS` | none | Cheap reviewer, e.g. `opencode:opencode-go/deepseek-v4.1-flash` |
-| `SHERIFF_REVIEW_MODEL` | `claude:claude-opus-5-5` | Final reviewer |
+| `SHERIFF_REVIEW_MODEL` | `claude:claude-opus-5-5` | Smart model for the final review |
 | `SHERIFF_FIRST_PASS_ROUNDS`, `SHERIFF_REVIEW_ROUNDS` | `3`, `3` | Reviews allowed per pull request |
 | `SHERIFF_PLAN` | `on` for a new install whose App can post plans, else off | `on` turns planning on. Anything else means off |
 | `SHERIFF_PLAN_SINCE` | set by `install` | Pull requests opened before this time (UTC, `2026-11-22T00:00:00Z`) need no plan |
-| `SHERIFF_PLAN_MODEL` | `claude:claude-opus-5-5` | Planner model |
+| `SHERIFF_PLAN_MODEL` | `claude:claude-opus-5-5` | Smart model for plans |
 | `SHERIFF_PLAN_ROUNDS` | `3` | Plans allowed per issue |
 | `SHERIFF_PLAN_TURNS` | `40` | Turns the planner may take per plan |
 | `SHERIFF_PLAN_WEB` | `search` | `search`, `allowlist` or `any` (see [Planning](#planning)) |
