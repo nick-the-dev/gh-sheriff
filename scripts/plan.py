@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Sheriff plan: the facts the planner shares, namely the comment markers, an issue read with its comments, the
-App's current plan on a task issue, the task issue of a pull request, the pull requests linked to an issue and the
-review keys that bind a review to one plan by its version and comment; who may ask for a plan, the budget, the task
-ID given to a plain issue a person opens, the reservation comment that the gate App posts before any model runs, and
-the same decision rechecked after a post for a command that arrived meanwhile; and writing the plan: the issue prepared as data, the read-only model run, and the post
-that turns the reservation into the plan or a failure note and marks the old version superseded."""
+"""Sheriff plan: the facts the planner shares, namely the comment markers, an issue read with its comments, the App's
+current plan on a task issue, the task issue of a pull request, the pull requests linked to an issue and the review
+keys that bind a review to one plan by its version and comment; who may ask for a plan, the budget, the task ID given
+to a plain issue a person opens, the reservation comment that the gate App posts before any model runs, and the same
+decision rechecked after a post for a command that arrived meanwhile; and writing the plan: the issue prepared as
+data, the read-only model run, and the post that turns the reservation into the plan or a failure note and marks the
+old version superseded."""
 import argparse
 import datetime
 import importlib.util
