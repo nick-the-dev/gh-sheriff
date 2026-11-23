@@ -413,6 +413,13 @@ class InstallationTests(unittest.TestCase):
         with mock.patch.object(cli, "gh_json", side_effect=[self.INSTALLATIONS, cli.SheriffError("403")]), mock.patch("builtins.print"):
             cli.ensure_installed(self.ORG, None, None, wait=False)
 
+    def test_a_personal_account_whose_installations_cannot_be_listed_leaves_the_check_to_the_first_run(self):
+        out = io.StringIO()
+        with mock.patch.object(cli, "gh_json", side_effect=cli.SheriffError("You must authenticate with an access token authorized to a GitHub App (HTTP 403)")), \
+             mock.patch("sys.stdout", out):
+            cli.ensure_installed({"owner": "nick", "repo": "nick/app", "kind": "User"}, None, None, wait=False)
+        self.assertIn("the first Sheriff run checks that nick-sheriff can reach nick/app", out.getvalue())
+
     def test_a_covered_repository_passes(self):
         with mock.patch.object(cli, "gh_json", side_effect=[self.INSTALLATIONS, [{"repositories": [{"full_name": "acme/web"}]}]]), \
              mock.patch("builtins.print"):

@@ -276,7 +276,12 @@ def installed(app_id, pem, repo):
 
 def app_installation(info, slug):
     path = "/orgs/" + info["owner"] + "/installations" if info["kind"] == "Organization" else "/user/installations"
-    rows = flat_pages(gh_json(["api", "--paginate", "--slurp", path]))
+    try:
+        rows = flat_pages(gh_json(["api", "--paginate", "--slurp", path]))
+    except SheriffError:
+        if info["kind"] == "Organization":
+            raise
+        return None, None
     found = next((row for page in rows for row in (page.get("installations") or []) if row.get("app_slug") == slug), None)
     if not found:
         return None, False
@@ -299,6 +304,10 @@ def ensure_installed(info, app_id, pem, wait=True):
     slug, repo = slug_for(info["owner"]), info["repo"]
     if pem is None:
         installation, covered = app_installation(info, slug)
+        if installation is None and covered is None:
+            say("..  a gh login cannot list a personal account's App installations; the first Sheriff run checks that " + slug
+                + " can reach " + repo)
+            return
         if covered:
             say("ok  " + slug + " is installed on " + repo)
             return
