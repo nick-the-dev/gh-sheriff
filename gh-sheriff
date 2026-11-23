@@ -547,9 +547,7 @@ def wanted_trigger_files(info, pin=""):
 
 
 def trigger_files_current(info, pin=""):
-    names = pr_workflow_names(info["repo"], info["branch"], required_contexts(info["repo"], info["branch"]))
-    return all(remote_file(info["repo"], ".github/workflows/" + name, info["branch"]) == render_template((HOME / "templates" / name).read_text(), names, pin)
-               for name in TEMPLATES)
+    return all(remote_file(info["repo"], path, info["branch"]) == text for path, text in wanted_files(info, pin).items())
 
 
 def installed_pin(info):
@@ -558,13 +556,15 @@ def installed_pin(info):
 
 
 def update_pin(info, choice):
-    if choice == "auto" or (choice is None and not installed_pin(info)):
+    current = installed_pin(info)
+    if choice == "auto" or (choice is None and not current):
         say("ok  updates: auto, following v1")
         return ""
     tag = "v" + VERSION
     if subprocess.run(["gh", "api", "repos/" + SHERIFF_REPO + "/git/ref/tags/" + tag], capture_output=True, text=True, check=False).returncode:
         raise SheriffError("Sheriff " + tag + " is not released: run gh extension upgrade sheriff, or use --updates auto")
-    say("ok  updates: pinned to " + tag + "; Dependabot proposes newer releases as pull requests")
+    say("ok  updates: pinned to " + tag + (" (was " + current + ")" if current and current != tag else "")
+        + "; Dependabot proposes newer releases as pull requests")
     return tag
 
 
@@ -639,8 +639,9 @@ def ensure_trigger_files(info, wait_merge=True, pin=""):
     gh(["api", "-X", "POST", "repos/" + repo + "/git/refs", "-f", "ref=refs/heads/" + work, "-f", "sha=" + head_sha])
     created = gh_json(["api", "-X", "POST", "repos/" + repo + "/pulls", "--input", "-"], json.dumps({
         "title": "Install Sheriff", "head": work, "base": branch,
-        "body": "Adds or updates Sheriff's trigger files (" + ", ".join("`" + path + "`" for path in sorted(stale)) + ") to match the "
-                "released Sheriff v1 templates (https://github.com/nick-the-dev/gh-sheriff/tree/v1/templates). Created by gh sheriff install."}))
+        "body": "Adds or updates Sheriff's files (" + ", ".join("`" + path + "`" for path in sorted(stale)) + ") to match the released "
+                "Sheriff templates (https://github.com/nick-the-dev/gh-sheriff/tree/v1/templates)" + (", pinned to " + pin + " with Dependabot "
+                "proposing updates" if pin else ", following v1") + ". Created by gh sheriff install."}))
     pr = {"url": created["html_url"], "number": created["number"]}
     verify_install_pr(repo, pr["number"], head_sha, set(stale))
     say("ok  pull request with the trigger files: " + pr["url"])
@@ -1120,7 +1121,8 @@ def install(args):
     if args.no_files and not trigger_files_current(info, pin):
         ensure_auto_merge(info)
         say("--  stopped before the trigger files (--no-files): add .github/workflows/sheriff.yml and sheriff-relay.yml from")
-        say("    " + str(HOME / "templates") + " through your own pull request, then run gh sheriff install again")
+        say("    " + str(HOME / "templates") + (" (with the Sheriff references pinned to " + pin + ", and " + DEPENDABOT_PATH
+            + " watching github-actions)" if pin else "") + " through your own pull request, then run gh sheriff install again")
         return
     ensure_trigger_files(info, pin=pin)
     ensure_auto_merge(info)

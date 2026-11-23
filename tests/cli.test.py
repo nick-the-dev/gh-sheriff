@@ -680,6 +680,13 @@ class UpdatesTests(unittest.TestCase):
         self.assertEqual(len(problems), 1)
         self.assertIn("Dependabot", problems[0])
 
+    def test_trigger_files_count_as_current_only_with_dependabot_in_place_when_pinned(self):
+        files = {".github/workflows/sheriff.yml": "x", cli.DEPENDABOT_PATH: cli.DEPENDABOT}
+        for remote, expected in (({".github/workflows/sheriff.yml": "x"}, False), (files, True)):
+            with self.subTest(expected=expected), mock.patch.object(cli, "wanted_files", return_value=files), \
+                 mock.patch.object(cli, "remote_file", side_effect=lambda repo, path, ref: remote.get(path)):
+                self.assertEqual(cli.trigger_files_current(self.INFO, "v1.0.0"), expected)
+
     def test_install_takes_the_updates_option(self):
         with mock.patch.object(cli, "install", side_effect=lambda args: self.assertEqual(args.updates, "pinned")):
             cli.main(["install", "--updates", "pinned"])

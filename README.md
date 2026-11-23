@@ -130,8 +130,8 @@ Sheriff is released as versions (`v1.0.0`, `v1.1.0`, ...), each an immutable tag
 always points at the latest `v1.x` release. While Sheriff is in beta, a breaking change can still ship within `v1`;
 a change that needs `gh sheriff install` to run again ships as `v2`.
 
-`gh sheriff install --updates` chooses how your repository takes releases, and running `install` without it keeps the
-current choice:
+`gh sheriff install --updates` chooses how your repository takes releases. Running `install` without it keeps the current
+mode; in pinned mode it pins the release of your `gh sheriff`, so upgrading the CLI and running `install` moves the pin:
 
 | Mode | Your `sheriff.yml` runs | Updates arrive |
 |---|---|---|
