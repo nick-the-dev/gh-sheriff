@@ -31,6 +31,10 @@ and the wrong outcome. A demonstrated departure from `review/plan.md` without a 
 section it departs from. Style, naming and preferences never block; list them as advisory. Do not invent problems to
 seem thorough, and do not stop at the first finding.
 
+Write for a person who knows the project but not this part of the code. Use short sentences and everyday words. Start
+each finding with one sentence that says plainly what goes wrong and when, then give the evidence and `path:line`.
+Explain a term, abbreviation or internal name the first time you use it, or leave it out. No filler and no hedging.
+
 Write your review as a short summary, then numbered findings marked BLOCKING or ADVISORY with `path:line`. Your very
 last line must be exactly `VERDICT: CLEAN` (no blocking findings) or `VERDICT: BLOCKED` (at least one), and nothing
 after it.

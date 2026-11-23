@@ -635,6 +635,15 @@ class PostTests(StepTests):
 
 
 class PromptTests(unittest.TestCase):
+    def test_the_plan_and_review_prompts_ask_for_plain_language(self):
+        for name, lead in (("plan.md", "Start each section with one sentence"), ("review.md", "Start each finding with one sentence")):
+            with self.subTest(prompt=name):
+                flat = " ".join((ROOT / "prompts" / name).read_text().split())
+                self.assertIn("Write for a person who knows the project but not this part of the code.", flat)
+                self.assertIn("Use short sentences and everyday words.", flat)
+                self.assertIn(lead, flat)
+                self.assertIn("Explain a term, abbreviation or internal name the first time you use it, or leave it out.", flat)
+
     def test_the_plan_prompt_names_every_section_the_data_rule_and_the_minimal_change_rule(self):
         text = (ROOT / "prompts/plan.md").read_text()
         flat = " ".join(text.split())

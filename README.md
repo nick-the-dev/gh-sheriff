@@ -128,6 +128,10 @@ posted by Sheriff's App, with six sections:
 - **Production check**: how to verify it after release.
 - **Out of scope**: what the task must not touch.
 
+Plans and reviews are written in plain language for someone who knows the project but not that part of the code: short
+sentences, everyday words, each section or finding opening with one sentence that states its point, and any term or
+internal name explained on first use.
+
 Only task issues are planned: those whose title starts with a task ID (`<ID>: ...` or `<ID> #n: ...`). Decision issues
 and pull requests never are. An issue a person opens without an ID is named first, when it would be planned: Sheriff
 renames it to `<WORDS>-<number>: <your title>`, three words of the title plus the issue number, so `Login page broken

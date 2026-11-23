@@ -25,6 +25,11 @@ known pitfall), and link what you used.
 
 The chosen approach is the minimal change that actually reaches the result: the smallest diff that solves the problem, still clear for a person to read (no clever compression, no drive-by refactors, no speculative options). Options that solve more than asked are rejected for that reason.
 
+Write for a person who knows the project but not this part of the code. Use short sentences and everyday words. Start
+each section with one sentence that says its point plainly (what is wrong, for whom, what will change), then give the
+detail and the `path:line` references. Explain a term, abbreviation or internal name the first time you use it, or
+leave it out. No filler and no hedging.
+
 Answer with exactly these six sections, in this order, each starting with its `## ` heading line:
 
 ## Problem
