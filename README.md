@@ -136,7 +136,7 @@ mode; in pinned mode it pins the release of your `gh sheriff`, so upgrading the 
 | Mode | Your `sheriff.yml` runs | Updates arrive |
 |---|---|---|
 | `auto` (the default) | `@v1` | At once, with every release |
-| `pinned` | `@v1.0.0`, the release your `gh sheriff` is | As a Dependabot pull request per release, which Sheriff reviews and you merge when ready. `install` adds `.github/dependabot.yml` for GitHub Actions if you have none; if you have one without a `github-actions` entry, it tells you to add one |
+| `pinned` | `@v1.0.0`, the release your `gh sheriff` is | As a Dependabot pull request per release, which Sheriff reviews and you merge when ready. Dependabot waits out its cooldown first (3 days after a release by default; `cooldown: default-days: 0` in `.github/dependabot.yml` removes it). `install` adds `.github/dependabot.yml` for GitHub Actions if you have none; if you have one without a `github-actions` entry, it tells you to add one |
 
 `gh sheriff doctor` reports the mode, the release your workflow runs and the latest release. Update the CLI with
 `gh extension upgrade sheriff`; when `doctor` says the trigger files differ, run `gh sheriff install` again.
