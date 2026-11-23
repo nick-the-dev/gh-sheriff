@@ -15,6 +15,10 @@
   <a href="https://cli.github.com/manual/gh_extension"><img src="https://img.shields.io/badge/gh-extension-black?logo=github" alt="gh extension"></a>
 </p>
 
+> [!WARNING]
+> **Beta.** Sheriff is in active development. Behaviour, settings and messages can change with any update, and an update
+> can break your setup. Pin a release if you need to decide when changes reach you ([Updates](#updates)).
+
 Sheriff is for repositories where AI agents open pull requests. One command sets up:
 
 - a smart model's plan on each task issue, before work starts ([Planning](#planning));
@@ -118,6 +122,24 @@ gh sheriff doctor --repo owner/name
    `Review` and `Merge gate`, and every review thread resolved, and it blocks deletion and force-pushes. Your existing
    required checks are kept.
 6. Adds three issue fields to your account and a Projects board named `<repo> work` (skip with `--no-work-state`).
+
+## Updates
+
+Sheriff is released as versions (`v1.0.0`, `v1.1.0`, ...), each an immutable tag with
+[release notes](https://github.com/nick-the-dev/gh-sheriff/releases) that flag anything breaking. `v1` is a tag that
+always points at the latest `v1.x` release. While Sheriff is in beta, a breaking change can still ship within `v1`;
+a change that needs `gh sheriff install` to run again ships as `v2`.
+
+`gh sheriff install --updates` chooses how your repository takes releases, and running `install` without it keeps the
+current choice:
+
+| Mode | Your `sheriff.yml` runs | Updates arrive |
+|---|---|---|
+| `auto` (the default) | `@v1` | At once, with every release |
+| `pinned` | `@v1.0.0`, the release your `gh sheriff` is | As a Dependabot pull request per release, which Sheriff reviews and you merge when ready. `install` adds `.github/dependabot.yml` for GitHub Actions if you have none; if you have one without a `github-actions` entry, it tells you to add one |
+
+`gh sheriff doctor` reports the mode, the release your workflow runs and the latest release. Update the CLI with
+`gh extension upgrade sheriff`; when `doctor` says the trigger files differ, run `gh sheriff install` again.
 
 ## Planning
 
@@ -274,7 +296,7 @@ cost, and exits with an error when the share of tokens without cache reads is ab
 
 | Command | Description |
 |---|---|
-| `gh sheriff install` | Set up a repository. Flags: `--repo`, `--first-pass`, `--review-model`, `--plan on\|off`, `--merges serial\|bundle`, `--no-work-state`, `--project-name`, `--no-files`, `--no-browser`, `--new-key` (store a fresh App key), `--rotate-secrets` (replace reviewer keys), `--yes` |
+| `gh sheriff install` | Set up a repository. Flags: `--repo`, `--first-pass`, `--review-model`, `--plan on\|off`, `--merges serial\|bundle`, `--no-work-state`, `--project-name`, `--no-files`, `--no-browser`, `--new-key` (store a fresh App key), `--rotate-secrets` (replace reviewer keys), `--updates auto\|pinned`, `--yes` |
 | `gh sheriff doctor` | Check the setup and print what to fix. Flags: `--repo`, `--no-work-state`, `--project-name` |
 | `gh sheriff models` | Choose the cheap and the smart reviewer. Flags: `--repo`, `--first-pass`, `--review-model`, `--rotate-secrets` |
 | `gh sheriff stats` | Show review and plan usage and cost. Flags: `--repo`, `--prs` (default 50), `--limit` (default 10) |
@@ -400,9 +422,9 @@ Board views: Needs human, Blocked, Ready, In flight, Awaiting verification, All 
 
 - **Prompt injection.** The reviewer reads text the pull request author wrote. It is told to treat that text as data,
   but a crafted change could still try to talk it into passing.
-- **Trusting `@v1`.** Your `sheriff.yml` runs Sheriff's actions at `@v1`, and the steps that need them get your Sheriff
-  secrets by name (never your other secrets). Release tags are protected. To review every update, pin a commit sha
-  instead.
+- **Trusting Sheriff's releases.** Your `sheriff.yml` runs Sheriff's actions at `@v1` (or at the pinned release), and
+  the steps that need them get your Sheriff secrets by name, never your other secrets. Release tags are protected: only
+  Sheriff's admins can change them. To review every update first, use `--updates pinned`, or pin a commit sha.
 - **One App per account.** One GitHub App serves all of an account's repositories; repositories with different admins
   should use separate Apps.
 - **Forks.** Pull requests from forks aren't reviewed automatically. Start a review with
@@ -428,9 +450,11 @@ Sheriff is standard-library Python and `gh`.
 | `scripts/` | The logic |
 | `templates/` | The two files `install` adds to a repository |
 
-`v1` is a moving tag that receives fixes. A new permission asked for only by jobs or inputs that a new template adds
-ships in `v1`, because old templates never run those jobs; a changed permission on a job an old template already runs
-ships as `v2`.
+Releasing: set `VERSION` in `gh-sheriff`, commit to `main`, then
+`gh release create vX.Y.Z --target main --notes-file NOTES.md` and move `v1` to the same commit
+(`git tag -f v1 vX.Y.Z && git push -f origin v1`). The `v*` tags are protected; only admins can move `v1`. A new
+permission asked for only by jobs or inputs that a new template adds ships in `v1`, because old templates never run
+those jobs; a changed permission on a job an old template already runs ships as `v2`.
 
 Issues and pull requests are welcome.
 

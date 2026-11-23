@@ -613,6 +613,82 @@ class MergeModeInstallTests(unittest.TestCase):
             cli.main(["install", "--merges", "parallel"])
 
 
+class UpdatesTests(unittest.TestCase):
+    INFO = {"repo": "o/r", "branch": "main"}
+
+    def test_the_version_is_semantic(self):
+        self.assertRegex(cli.VERSION, r"^\d+\.\d+\.\d+$")
+
+    def test_pinning_replaces_every_sheriff_reference_and_its_note(self):
+        text = (ROOT / "templates/sheriff.yml").read_text()
+        pinned = cli.pin_template(text, "v1.2.3")
+        self.assertEqual(pinned.count("@v1.2.3 " + cli.PINNED_NOTE), text.count("@v1 # zizmor"))
+        self.assertNotIn("@v1 ", pinned)
+        self.assertNotIn("follows Sheriff v1", pinned)
+        self.assertEqual(cli.pin_template(text, ""), text)
+
+    def test_the_installed_pin_is_read_from_the_workflow(self):
+        text = (ROOT / "templates/sheriff.yml").read_text()
+        for remote, expected in ((cli.pin_template(text, "v1.2.3"), "v1.2.3"), (text, ""), (None, "")):
+            with self.subTest(expected=expected), mock.patch.object(cli, "remote_file", return_value=remote):
+                self.assertEqual(cli.installed_pin(self.INFO), expected)
+
+    def test_the_pin_follows_the_flag_and_otherwise_keeps_the_mode(self):
+        found = mock.Mock(returncode=0)
+        for choice, current, expected in (("auto", "v1.0.0", ""), ("pinned", "", "v" + cli.VERSION), (None, "v0.9.0", "v" + cli.VERSION), (None, "", "")):
+            with self.subTest(choice=choice, current=current), mock.patch.object(cli, "installed_pin", return_value=current), \
+                 mock.patch.object(cli.subprocess, "run", return_value=found), mock.patch("sys.stdout", io.StringIO()):
+                self.assertEqual(cli.update_pin(self.INFO, choice), expected)
+        with mock.patch.object(cli, "installed_pin", return_value=""), mock.patch.object(cli.subprocess, "run", return_value=mock.Mock(returncode=1)), \
+             self.assertRaises(cli.SheriffError):
+            cli.update_pin(self.INFO, "pinned")
+
+    def wanted(self, pin, dependabot):
+        out = io.StringIO()
+        remote = lambda repo, path, ref: dependabot if path == cli.DEPENDABOT_PATH else None
+        with mock.patch.object(cli, "wanted_trigger_files", return_value={"sheriff.yml": "x"}), mock.patch.object(cli, "remote_file", side_effect=remote), \
+             mock.patch("sys.stdout", out):
+            return cli.wanted_files(self.INFO, pin), out.getvalue()
+
+    def test_a_pinned_install_adds_dependabot_only_when_it_is_missing(self):
+        files, _ = self.wanted("", None)
+        self.assertEqual(files, {".github/workflows/sheriff.yml": "x"})
+        files, _ = self.wanted("v1.0.0", None)
+        self.assertIn("package-ecosystem: github-actions", files[cli.DEPENDABOT_PATH])
+        files, said = self.wanted("v1.0.0", "version: 2\nupdates:\n  - package-ecosystem: \"github-actions\"\n")
+        self.assertNotIn(cli.DEPENDABOT_PATH, files)
+        self.assertNotIn("!!", said)
+        files, said = self.wanted("v1.0.0", "version: 2\nupdates:\n  - package-ecosystem: npm\n")
+        self.assertNotIn(cli.DEPENDABOT_PATH, files)
+        self.assertIn("!!  add a github-actions entry to .github/dependabot.yml", said)
+
+    def notes(self, pin, latest, dependabot=None):
+        release = mock.Mock(returncode=0 if latest else 1, stdout=latest + "\n")
+        remote = lambda repo, path, ref: dependabot if path == cli.DEPENDABOT_PATH else None
+        with mock.patch.object(cli.subprocess, "run", return_value=release), mock.patch.object(cli, "remote_file", side_effect=remote):
+            return cli.update_notes(self.INFO, pin)
+
+    def test_doctor_reports_the_versions_and_the_update_mode(self):
+        notes, problems = self.notes("", "v" + cli.VERSION)
+        self.assertEqual((notes, problems), (["ok  updates: auto, following v1 (gh sheriff v" + cli.VERSION + ")"], []))
+        notes, _ = self.notes("", "v99.0.0")
+        self.assertIn("!!  this gh sheriff is v" + cli.VERSION + "; the latest release is v99.0.0: run gh extension upgrade sheriff", notes)
+        notes, problems = self.notes("v0.1.0", "v99.0.0", "updates:\n  - package-ecosystem: github-actions\n")
+        self.assertIn("ok  updates: pinned to v0.1.0; the latest release is v99.0.0 (Dependabot proposes it)", notes)
+        self.assertEqual(problems, [])
+        _, problems = self.notes("v0.1.0", "", None)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("Dependabot", problems[0])
+
+    def test_install_takes_the_updates_option(self):
+        with mock.patch.object(cli, "install", side_effect=lambda args: self.assertEqual(args.updates, "pinned")):
+            cli.main(["install", "--updates", "pinned"])
+        with mock.patch.object(cli, "install", side_effect=lambda args: self.assertIsNone(args.updates)):
+            cli.main(["install"])
+        with mock.patch("sys.stderr", io.StringIO()), self.assertRaises(SystemExit):
+            cli.main(["install", "--updates", "nightly"])
+
+
 class MergeModeDoctorTests(unittest.TestCase):
     def notes(self, variables):
         with mock.patch.object(cli, "repo_variable", side_effect=lambda repo, name: variables.get(name, "")):
@@ -652,10 +728,13 @@ class MergeModeDoctorTests(unittest.TestCase):
              mock.patch.object(cli, "repo_variable", side_effect=lambda repo, name: variables.get(name, "")), \
              mock.patch.object(cli.subprocess, "run", return_value=policies), \
              mock.patch.object(cli, "wanted_trigger_files", return_value={}), \
+             mock.patch.object(cli, "installed_pin", return_value=""), \
+             mock.patch.object(cli, "update_notes", return_value=(["ok  updates: auto, following v1"], [])), \
              mock.patch.object(cli, "gh_json", return_value=[]), \
              mock.patch("sys.stdout", out):
             cli.main(["doctor", "--no-work-state"])
         self.assertIn("!!  bundle merges have no production reference", out.getvalue())
+        self.assertIn("ok  updates: auto, following v1", out.getvalue())
 
 
 class ReadmeTests(unittest.TestCase):
