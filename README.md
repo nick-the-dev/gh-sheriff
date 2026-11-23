@@ -119,6 +119,7 @@ It does the following:
 With `SHERIFF_PLAN=on`, Claude Opus writes a plan on each task issue before the work starts. The plan is a comment
 posted by Sheriff's App, with seven sections:
 
+- **Priority**: how urgent the task is, with one sentence saying why (see the scale below).
 - **Problem**: what is wrong or missing, and why it matters.
 - **Solution space**: the options, with web research where it changes the answer, and why the others were rejected.
 - **Chosen approach**: the design, the files to change, edge cases and risks. It is the minimal readable change: the
@@ -127,6 +128,18 @@ posted by Sheriff's App, with seven sections:
 - **Tests**: the tests that prove the change, failing before and passing after.
 - **Production check**: how to verify it after release.
 - **Out of scope**: what the task must not touch.
+
+**Priority.** The planner judges every task on this scale, and Sheriff puts the matching label on the issue:
+
+| Label | Meaning |
+|---|---|
+| `priority:P0` | Production is broken or unsafe now: users cannot use a core feature, data is lost or wrong, a security hole is open, or trading figures shown to users are wrong. |
+| `priority:P1` | A real problem with a workaround, or work that blocks other work. This week. |
+| `priority:P2` | A normal fix or improvement. The default. |
+| `priority:P3` | Nice to have, cleanup, someday. |
+
+To override, change the label. Sheriff never changes or removes a priority label a person set; a replan judges the
+priority again only while the label is Sheriff's own. Your agents can pick work by these labels.
 
 Plans and reviews are written in plain language for someone who knows the project but not that part of the code: short
 sentences, everyday words, each section or finding opening with one sentence that states its point, and any term or
