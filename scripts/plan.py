@@ -16,6 +16,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import urllib.parse
 
 ID = r"[A-Z][A-Z0-9-]+"
 TASK_TITLE = re.compile(r"^(" + ID + r")(?: #\d+)?: ")
@@ -43,6 +44,10 @@ KEY_SEPARATOR = "/plan-"
 DEFAULT_MODEL = "claude:claude-opus-5-5"
 SECTIONS = ("Priority", "Problem", "Solution space", "Chosen approach", "Tests", "Production check", "Out of scope")
 PRIORITY_LINE = re.compile(r"\**(P[0-3])\b")
+PRIORITY_LABELS = {"P0": ("b60205", "Production is broken or unsafe now"),
+                   "P1": ("d93f0b", "A real problem with a workaround, or blocks other work: this week"),
+                   "P2": ("fbca04", "A normal fix or improvement (the default)"),
+                   "P3": ("c5def5", "Nice to have, cleanup, someday")}
 PLAN_LIMIT = 20_000
 TITLE_LIMIT = 300
 BODY_LIMIT = 20_000
@@ -492,6 +497,30 @@ def record_problem(record, issue, version):
     return check_plan(record["text"])
 
 
+def apply_priority(number, level, slug):
+    issue = "repos/{owner}/{repo}/issues/" + str(number)
+    current = [str(label.get("name") or "") for label in gh_json(["api", issue + "/labels"]) or [] if isinstance(label, dict)]
+    present = [name for name in current if name.lower().startswith("priority:")]
+    if present:
+        setters = {}
+        for event in gh_json(["api", issue + "/events?per_page=100"]) or []:
+            if isinstance(event, dict) and event.get("event") == "labeled":
+                setters[str((event.get("label") or {}).get("name") or "").lower()] = str((event.get("actor") or {}).get("login") or "")
+        if any(setters.get(name.lower(), "") != slug + "[bot]" for name in present):
+            return "kept"
+    wanted = "priority:" + level
+    if present == [wanted]:
+        return "same"
+    color, description = PRIORITY_LABELS[level]
+    run(["gh", "label", "create", wanted, "--color", color, "--description", description, "--force"])
+    for name in present:
+        if name != wanted:
+            gh_json(["api", "-X", "DELETE", issue + "/labels/" + urllib.parse.quote(name, safe="")])
+    if wanted not in present:
+        gh_json(["api", "-X", "POST", issue + "/labels", "-f", "labels[]=" + wanted])
+    return "set"
+
+
 def patch_comment(comment_id, body):
     with tempfile.TemporaryDirectory() as folder:
         path = pathlib.Path(folder) / "body.md"
@@ -531,6 +560,12 @@ def post(args):
             patch_comment(old["id"], supersede(old["body"], args.version))
         except PlanError as exc:
             print(json.dumps({"ok": False, "warning": str(exc)}), file=sys.stderr, flush=True)
+    level = priority_of(record["text"])
+    if level:
+        try:
+            apply_priority(args.issue, level, slug)
+        except PlanError as exc:
+            print(json.dumps({"ok": False, "warning": "priority label of issue " + str(args.issue) + ": " + str(exc)}), file=sys.stderr, flush=True)
     prs = ""
     try:
         rows = gh_json(["pr", "list", "--state", "open", "--limit", "200", "--json", "number,title,closingIssuesReferences"])

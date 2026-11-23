@@ -572,12 +572,65 @@ class RunTests(StepTests):
         self.assertEqual(self.seen[-1]["web"], ())
 
 
+class PriorityLabelTests(unittest.TestCase):
+    def apply(self, labels, events=(), level="P1"):
+        writes = []
+
+        def gh(args):
+            if args[-1].endswith("/labels") and len(args) == 2:
+                return [{"name": name} for name in labels]
+            if "/events" in args[-1]:
+                return [{"event": "labeled", "label": {"name": name}, "actor": {"login": login}} for name, login in events]
+            writes.append(args)
+            return []
+        with mock.patch.object(plan, "gh_json", side_effect=gh), mock.patch.object(plan, "run", side_effect=lambda args, cwd=None: writes.append(args) or ""):
+            result = plan.apply_priority(12, level, APP)
+        return result, writes
+
+    def test_an_unlabelled_issue_gets_its_priority_label_created_and_added(self):
+        result, writes = self.apply(["bug"])
+        self.assertEqual(result, "set")
+        self.assertEqual(writes[0][:3] + writes[0][-1:], ["gh", "label", "create", "--force"])
+        self.assertIn("priority:P1", writes[0])
+        self.assertEqual(writes[1], ["api", "-X", "POST", "repos/{owner}/{repo}/issues/12/labels", "-f", "labels[]=priority:P1"])
+
+    def test_sheriffs_own_label_is_replaced_by_a_new_judgement(self):
+        result, writes = self.apply(["priority:P2"], [("priority:P2", APP + "[bot]")])
+        self.assertEqual(result, "set")
+        self.assertIn(["api", "-X", "DELETE", "repos/{owner}/{repo}/issues/12/labels/priority%3AP2"], writes)
+        self.assertEqual(writes[-1][-1], "labels[]=priority:P1")
+
+    def test_the_same_priority_writes_nothing(self):
+        self.assertEqual(self.apply(["priority:P1"], [("priority:P1", APP + "[bot]")]), ("same", []))
+
+    def test_a_label_a_person_set_is_never_touched(self):
+        for labels, events in ((["priority:P3"], [("priority:P3", "boss")]), (["priority:P3", "priority:P1"], [("priority:P3", "boss"), ("priority:P1", APP + "[bot]")]),
+                               (["priority:P3"], [])):
+            with self.subTest(labels=labels, events=events):
+                self.assertEqual(self.apply(labels, events), ("kept", []))
+
+
 class PostTests(StepTests):
     OLD = planned(1)
 
+    def test_a_failed_label_write_still_posts_the_plan_with_a_warning(self):
+        path = pathlib.Path(tempfile.mkdtemp()) / "plan.json"
+        path.write_text(json.dumps(CommentTests.RECORD))
+        outs = []
+        with mock.patch.object(plan, "read_issue", return_value=task([planned(1), reservation(2)])), \
+             mock.patch.object(plan, "apply_priority", side_effect=plan.PlanError("gh label create failed: 403")) as applied, \
+             mock.patch.object(plan, "gh_json", return_value=[]), mock.patch.object(plan, "run", return_value=""), \
+             mock.patch.object(plan, "output", side_effect=lambda **v: outs.append(v)), mock.patch("sys.stderr") as err, \
+             mock.patch.dict(os.environ, {"GH_REPO": "o/r", "GH_ACTOR_LOGIN": APP + "[bot]"}):
+            code = plan.main(["post", "--record", str(path), "--issue", "12", "--version", "2", "--comment-id", "55"])
+        self.assertEqual((code, outs[-1]["posted"]), (0, "true"))
+        self.assertEqual(applied.call_args.args, (12, "P2", APP))
+        self.assertIn("403", "".join(c.args[0] for c in err.write.call_args_list))
+
     def test_a_plan_replaces_its_reservation_then_supersedes_the_previous_version(self):
         calls, outs = self.post(task([planned(1), reservation(2)]), CommentTests.RECORD, prs=[{"number": 21, "title": "x (LOGIN-FIX)", "closingIssuesReferences": []}])
-        self.assertEqual([c[4] for c in calls], ["repos/{owner}/{repo}/issues/comments/55", "repos/{owner}/{repo}/issues/comments/101"])
+        self.assertEqual([c[4] for c in calls if c[1] == "api"], ["repos/{owner}/{repo}/issues/comments/55", "repos/{owner}/{repo}/issues/comments/101"])
+        self.assertEqual(calls[2][:4], ["gh", "label", "create", "priority:P2"])
         self.assertTrue(calls[0][-1].startswith("<!-- sheriff-plan v=2 base=" + BASE + " -->"))
         self.assertTrue(calls[1][-1].startswith("<!-- sheriff-plan v=1 base=" + BASE + " superseded-by=2 -->"))
         self.assertEqual((outs[-1]["posted"], outs[-1]["prs"]), ("true", "21"))
