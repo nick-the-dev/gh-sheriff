@@ -118,7 +118,8 @@ class PlanWiringTests(unittest.TestCase):
         for part in ("vars.SHERIFF_PLAN == 'on'", "!github.event.issue.pull_request", "github.event.action == 'created'",
                      "'/sheriff plan'", "'/sheriff replan'", "github.event.action == 'opened'"):
             self.assertIn(part, condition)
-        self.assertIn("  issues:\n    types: [opened]\n", TEMPLATE)
+        self.assertIn("  issues:\n    types: [opened, edited]\n", TEMPLATE)
+        self.assertIn("(github.event_name == 'issues' && github.event.action == 'opened')", condition)
 
     def test_a_persons_reply_on_an_issue_waiting_for_a_decision_starts_planning(self):
         condition = block(TEMPLATE, "plan-reserve")
@@ -133,9 +134,14 @@ class PlanWiringTests(unittest.TestCase):
         self.assertIn('--deciders "$DECIDERS"', reserve)
         self.assertEqual(post.count('--deciders "$DECIDERS"'), 2)
 
-    def test_issue_events_start_neither_the_gate_nor_the_work_state(self):
-        for job in ("gate", "state"):
-            self.assertIn("github.event_name != 'issues'", block(TEMPLATE, job))
+    def test_issue_events_never_start_the_gate_and_start_the_work_state_only_when_opened_or_retitled(self):
+        self.assertIn("github.event_name != 'issues'", block(TEMPLATE, "gate"))
+        self.assertIn("(github.event_name != 'issues' || github.event.action == 'opened' || github.event.changes.title)", block(TEMPLATE, "state"))
+
+    def test_the_work_state_gets_its_settings(self):
+        for name in ("SHERIFF_VERSION_URL", "SHERIFF_DEPLOY_WORKFLOW", "SHERIFF_HEALTH_URL", "SHERIFF_PROJECT", "SHERIFF_WORK_STATE_SINCE"):
+            with self.subTest(name=name):
+                self.assertIn(name + ": ${{ vars." + name + " }}", block(TEMPLATE, "state"))
 
     def test_the_planner_step_gets_the_model_keys_and_no_github_token(self):
         action = (ROOT / "actions/plan/action.yml").read_text()

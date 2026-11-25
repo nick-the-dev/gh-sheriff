@@ -955,6 +955,42 @@ def ensure_work_state(info, title, wait=False):
     return not field_problems(repository)
 
 
+def project_title(repo, explicit=None):
+    return explicit or repo_variable(repo, "SHERIFF_PROJECT") or WORK.default_board(repo)
+
+
+def turn_on_work_state(info, explicit, wait):
+    repo = info["repo"]
+    if not ensure_work_state(info, project_title(repo, explicit), wait):
+        say("--  work state stays off until the issue fields exist")
+        return False
+    if explicit:
+        set_variable(repo, "SHERIFF_PROJECT", explicit)
+    since = repo_variable(repo, "SHERIFF_WORK_STATE_SINCE")
+    if not since:
+        since = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        set_variable(repo, "SHERIFF_WORK_STATE_SINCE", since)
+    set_variable(repo, "SHERIFF_WORK_STATE", "on")
+    say("ok  work state is on: pull requests and releases move each task's Stage")
+    say("    issues closed before " + since + " (SHERIFF_WORK_STATE_SINCE) keep their Stage: Sheriff audits Verified evidence only after it")
+    say(STATUS_NOTE)
+    return True
+
+
+def evidence_problems(repo):
+    problems = [] if repo_variable(repo, "SHERIFF_WORK_STATE_SINCE") else [
+        "SHERIFF_WORK_STATE_SINCE is not set, so closed issues are not audited for Verified evidence; gh sheriff install sets it"]
+    try:
+        WORK.use_repo(repo)
+        pending = WORK.reverts(WORK.sync(False))
+    except WORK.WorkError as exc:
+        say("--  could not preview the next work-state sync: " + str(exc)[:200])
+        return problems
+    if pending:
+        say("!!  the next sync sets " + str(pending) + " Verified task(s) without recorded evidence back: gh sheriff task sync lists them")
+    return problems
+
+
 def work_state_problems(info, title):
     try:
         problems = field_problems(work_fields(info))
@@ -1139,12 +1175,7 @@ def install(args):
     first_run(info)
     ensure_ruleset(info, app_id, args.yes)
     if not args.no_work_state:
-        if ensure_work_state(info, args.project_name or WORK.board_title(info["repo"]), sys.stdin.isatty() and not args.yes):
-            set_variable(info["repo"], "SHERIFF_WORK_STATE", "on")
-            say("ok  work state is on: pull requests and releases move each task's Stage")
-            say(STATUS_NOTE)
-        else:
-            say("--  work state stays off until the issue fields exist")
+        turn_on_work_state(info, args.project_name, sys.stdin.isatty() and not args.yes)
     say("Done. Every new pull request head is now reviewed by Sheriff, and GitHub merges only what Sheriff marks green.")
 
 
@@ -1208,7 +1239,8 @@ def doctor(args):
         if detail.get("enforcement") != "active":
             problems.append("the ruleset is not active")
     if repo_variable(repo, "SHERIFF_WORK_STATE") == "on" and not args.no_work_state:
-        problems += work_state_problems(info, args.project_name or WORK.board_title(repo))
+        title = project_title(repo, args.project_name)
+        problems += work_state_problems(info, title) + evidence_problems(repo)
         say(STATUS_NOTE)
         if info["kind"] == "Organization":
             problem = projects_permission_problem(info, slug)
@@ -1216,8 +1248,8 @@ def doctor(args):
                 problems.append(problem)
         else:
             say("--  GitHub Apps cannot write user-owned boards, so Status is mirrored only when you run gh sheriff task board-status --apply with your own gh login")
-        WORK.REPO = repo
-        stale = status_differs(args.project_name or WORK.board_title(repo))
+        WORK.use_repo(repo)
+        stale = status_differs(title)
         if stale:
             say("!!  " + str(stale) + " board item(s) have a built-in Status that differs from their Stage: run gh sheriff task board-status --apply")
     elif not args.no_work_state:
@@ -1328,7 +1360,7 @@ def main(argv=None):
     install_parser.add_argument("--no-browser", action="store_true", help="print the pages to open instead of opening them")
     install_parser.add_argument("--no-files", action="store_true", help="do not open a pull request with the trigger files; add them yourself")
     install_parser.add_argument("--no-work-state", action="store_true", help="skip the issue fields and the project board")
-    install_parser.add_argument("--project-name", help="title of the repository's project board (default: the repository's name plus ' work')")
+    install_parser.add_argument("--project-name", help="title of the repository's project board, saved as SHERIFF_PROJECT (default: SHERIFF_PROJECT, else the repository's name plus ' work')")
     models_parser = sub.add_parser("models", help="choose the cheap first-pass and the final reviewer")
     models_parser.add_argument("--repo", help="owner/name (default: the repository in the current folder)")
     models_parser.add_argument("--first-pass", help="provider:model, or '' for none")
@@ -1341,7 +1373,7 @@ def main(argv=None):
     doctor_parser = sub.add_parser("doctor", help="check that Sheriff is set up correctly")
     doctor_parser.add_argument("--repo", help="owner/name (default: the repository in the current folder)")
     doctor_parser.add_argument("--no-work-state", action="store_true", help="do not check the issue fields and the project board")
-    doctor_parser.add_argument("--project-name", help="title of the repository's project board (default: the repository's name plus ' work')")
+    doctor_parser.add_argument("--project-name", help="title of the repository's project board (default: SHERIFF_PROJECT, else the repository's name plus ' work')")
     task_parser = sub.add_parser("task", help="record work as issues whose Stage follows pull requests and releases")
     WORK.add_commands(task_parser)
     args = parser.parse_args(argv)

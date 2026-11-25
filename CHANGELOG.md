@@ -7,6 +7,40 @@ release is made.
 
 ## [Unreleased]
 
+### Added
+
+- **Adopting work state is safe for existing history.** `install` sets `SHERIFF_WORK_STATE_SINCE` when it turns work
+  state on, and the evidence audit (Verified without recorded evidence moves back and the issue reopens) covers only open
+  issues and issues closed after it. `gh sheriff doctor` and a dry-run `gh sheriff task sync` say how many tasks the
+  next sync would set back.
+- `SHERIFF_PROJECT` names the work board. `install --project-name` saves it, and `task new`, `task board-status`,
+  `doctor` and the Status mirror use it instead of `<repo> work`.
+- `gh sheriff task ask <ID> --question "..." [--to <login>]` asks a person: it labels the issue `sheriff:needs-person`,
+  @mentions and assigns them (default `SHERIFF_DECIDERS`), and the task leaves `ready` until `task ask <ID> --clear`.
+- `gh sheriff task show <ID>`, `gh sheriff task drop <ID> --reason "..."` (closes as not planned and releases the claim),
+  and `task new --blocked-by <ID> --blocks <ID>`.
+- Items in `status --json` carry `priority` (from `priority:P*` labels), `updated`, `closed`, `asked`, `assignees` and
+  each blocker's `title`. `ready` and `needs_you` are ordered by priority, then age; `ready` also leaves out tasks with an
+  open pull request or an open question, and `needs_you` also lists issues labelled `sheriff:needs-decision` or
+  `sheriff:needs-person`.
+- The sync makes an open task issue without a Stage a Candidate (Verify by "Live check" if empty), and returns In
+  progress work whose pull requests were all closed without merging to Candidate, releasing its claim. The state job
+  also runs when an issue is opened or retitled.
+- `task verify` finds the task's merge by searching for its ID, not only among the 200 most recent merged pull requests,
+  and verifies work without a pull request (its evidence comment carries `sha=none`).
+- `SHERIFF_HEALTH_URL` also gates Released: no task becomes Released while it does not return 200.
+
+### Changed
+
+- Without `SHERIFF_WORK_STATE_SINCE`, closed issues are no longer audited for Verified evidence; open issues still are.
+
+### Upgrading
+
+- Run `gh sheriff install` to get the new `sheriff.yml`: its state job runs when an issue is opened or retitled and
+  passes `SHERIFF_HEALTH_URL`, `SHERIFF_PROJECT` and `SHERIFF_WORK_STATE_SINCE` to the sync. `install` also sets
+  `SHERIFF_WORK_STATE_SINCE` on a repository whose work state is already on, so closed issues are audited again from
+  then on. Until then the old file keeps working without those.
+
 ## [1.2.0] - 2026-11-25
 
 ### Added

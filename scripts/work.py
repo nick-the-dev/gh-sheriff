@@ -26,9 +26,14 @@ PR_TITLE_RE = re.compile(r"\((" + ID + r")\)$")
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 AGENT_MARK = "<!-- sheriff-ack -->"
 VERIFIED_MARK = "<!-- sheriff-verified sha={} -->"
-VERIFIED_RE = re.compile(r"<!-- sheriff-verified sha=([0-9a-f]{40}) -->")
+VERIFIED_RE = re.compile(r"<!-- sheriff-verified sha=([0-9a-f]{40}|none) -->")
+NO_MERGE = "none"
 DECISION_LABEL = "decision"
 NEEDS_DECISION_LABEL = "sheriff:needs-decision"
+ASK_LABEL = "sheriff:needs-person"
+PRIORITIES = ("P0", "P1", "P2", "P3")
+DEFAULT_PRIORITY = "P2"
+REVERT_WHY = "Verified without recorded evidence"
 STOP_WORDS = frozenset("a an and as at be by for from in into is it of on or the to with".split())
 PAGES = 2
 RESERVE = 100
@@ -38,6 +43,7 @@ TEXT_LIMIT = 1024
 BODY_LIMIT = 65000
 EVIDENCE_MIN = 40
 REPO = ""
+VARIABLES = {}
 
 
 class WorkError(Exception):
@@ -46,6 +52,16 @@ class WorkError(Exception):
 
 def setting(name):
     return (os.environ.get(name) or "").strip()
+
+
+def variable(name):
+    if name not in VARIABLES:
+        value = setting(name)
+        if not value and REPO:
+            found = gh(["variable", "get", name, "--repo", REPO])
+            value = found.stdout.strip() if found.returncode == 0 else ""
+        VARIABLES[name] = value
+    return VARIABLES[name]
 
 
 def gh(args, stdin=None):
@@ -91,6 +107,7 @@ def use_repo(explicit=None):
         REPO = found.stdout.strip() if found.returncode == 0 else ""
     if not re.fullmatch(r"[\w.-]+/[\w.-]+", REPO):
         raise WorkError("run this inside a GitHub repository or pass --repo owner/name")
+    VARIABLES.clear()
     return REPO
 
 
@@ -131,11 +148,12 @@ def require(known):
     return known
 
 
-ISSUE = """id number title state stateReason url createdAt issueType{name} labels(first:20){nodes{name}}
+ISSUE = """id number title state stateReason url createdAt updatedAt closedAt issueType{name} labels(first:20){nodes{name}}
+ assignees(first:10){nodes{login}}
  issueFieldValues(first:20){nodes{__typename
   ... on IssueFieldSingleSelectValue{name field{... on IssueFieldSingleSelect{name}}}
   ... on IssueFieldTextValue{value field{... on IssueFieldText{name}}}}}
- blockedBy(first:30){nodes{number state}}
+ blockedBy(first:30){nodes{number state title}}
  comments(last:1){nodes{author{login __typename} body}}"""
 ISSUES_QUERY = ("query($owner:String!,$name:String!,$states:[IssueState!],$field:IssueOrderField!,$direction:OrderDirection!,$cursor:String){"
                 "repository(owner:$owner,name:$name){issues(first:100,after:$cursor,states:$states,orderBy:{field:$field,direction:$direction}){"
@@ -176,12 +194,20 @@ def to_item(node):
     labels = [label.get("name") for label in (node.get("labels") or {}).get("nodes") or []]
     return {"id": match.group(1) if match else None, "node": node["id"], "number": node["number"],
             "title": title[len(match.group(0)):] if match else title, "open": node.get("state") == "OPEN",
-            "reason": node.get("stateReason"), "url": node.get("url"), "created": node.get("createdAt") or "", "type": kind,
+            "reason": node.get("stateReason"), "url": node.get("url"), "created": node.get("createdAt") or "",
+            "updated": node.get("updatedAt") or "", "closed": node.get("closedAt"), "type": kind,
+            "priority": next((level for level in PRIORITIES if "priority:" + level in labels), None),
             "decision": kind == "Decision" or DECISION_LABEL in labels, "needs_decision": NEEDS_DECISION_LABEL in labels,
-            "stage": values.get(FIELDS["stage"]), "verify": values.get(FIELDS["verify"]), "next": values.get(FIELDS["next"]),
-            "claimed_by": values.get(CLAIM_FIELD),
-            "blocked_by": [{"number": b["number"], "open": b.get("state") == "OPEN"} for b in (node.get("blockedBy") or {}).get("nodes") or []],
+            "asked": ASK_LABEL in labels, "stage": values.get(FIELDS["stage"]), "verify": values.get(FIELDS["verify"]),
+            "next": values.get(FIELDS["next"]), "claimed_by": values.get(CLAIM_FIELD),
+            "assignees": [person.get("login") for person in (node.get("assignees") or {}).get("nodes") or [] if person],
+            "blocked_by": [{"number": b["number"], "open": b.get("state") == "OPEN", "title": b.get("title")}
+                           for b in (node.get("blockedBy") or {}).get("nodes") or []],
             "awaits_reply": awaits_reply((node.get("comments") or {}).get("nodes") or [])}
+
+
+def priority_key(item):
+    return PRIORITIES.index(item.get("priority") or DEFAULT_PRIORITY), item.get("created") or ""
 
 
 def issues(state="OPEN", pages=MAX_PAGES):
@@ -212,7 +238,9 @@ def lookup(task):
 
 PRS_QUERY = """query($owner:String!,$name:String!,$states:[PullRequestState!],$cursor:String){repository(owner:$owner,name:$name){
  defaultBranchRef{name} pullRequests(first:100,after:$cursor,states:$states,orderBy:{field:UPDATED_AT,direction:DESC}){
- pageInfo{hasNextPage endCursor} nodes{number title state headRefName baseRefName isCrossRepository mergedAt mergeCommit{oid}}}}}"""
+ pageInfo{hasNextPage endCursor} nodes{number title state headRefName baseRefName isCrossRepository mergedAt closedAt mergeCommit{oid}}}}}"""
+TASK_PRS_QUERY = """query($q:String!){search(query:$q,type:ISSUE,first:100){nodes{... on PullRequest{
+ number title state headRefName baseRefName isCrossRepository mergedAt mergeCommit{oid}}}}}"""
 
 
 def pr_task(pr):
@@ -225,7 +253,7 @@ def pr_task(pr):
 
 def pull_requests(pages=PAGES, merged=True):
     groups, default = {}, None
-    for state, limit in (("OPEN", MAX_PAGES), ("MERGED", pages if merged else 0)):
+    for state, limit in (("OPEN", MAX_PAGES), ("MERGED", pages if merged else 0), ("CLOSED", pages if merged else 0)):
         if not limit:
             continue
         data, nodes = paged(PRS_QUERY, dict(names(), states=[state]), lambda found: found["repository"]["pullRequests"], limit)
@@ -235,8 +263,16 @@ def pull_requests(pages=PAGES, merged=True):
             if not task or pr.get("isCrossRepository") or (state == "MERGED" and pr.get("baseRefName") != default):
                 continue
             groups.setdefault(task, []).append({"number": pr["number"], "state": state, "merged_at": pr.get("mergedAt"),
-                                                "commit": (pr.get("mergeCommit") or {}).get("oid")})
+                                                "closed_at": pr.get("closedAt"), "commit": (pr.get("mergeCommit") or {}).get("oid")})
     return groups, default
+
+
+def task_merges(task, branch):
+    if not task:
+        return []
+    nodes = gql(TASK_PRS_QUERY, {"q": "repo:" + REPO + ' is:pr is:merged "' + task + '"'})["search"]["nodes"]
+    return [{"number": pr["number"], "state": "MERGED", "merged_at": pr.get("mergedAt"), "commit": (pr.get("mergeCommit") or {}).get("oid")}
+            for pr in nodes if pr and pr.get("number") and pr_task(pr) == task and not pr.get("isCrossRepository") and pr.get("baseRefName") == branch]
 
 
 def served_sha(url):
@@ -248,6 +284,15 @@ def served_sha(url):
         return None
     sha = body.get("sha") if isinstance(body, dict) else None
     return sha if isinstance(sha, str) and SHA_RE.fullmatch(sha) else None
+
+
+def answers(url):
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        with opener.open(url, timeout=10) as response:
+            return response.getcode() == 200
+    except (urllib.error.URLError, OSError, http.client.HTTPException):
+        return False
 
 
 def compare(commit, sha, cache):
@@ -272,6 +317,15 @@ def deploy_runs(workflow, branch):
 
 
 def release_check(branch):
+    check, health = facts_check(branch), setting("SHERIFF_HEALTH_URL")
+    if not health:
+        return check
+    if not answers(health):
+        return lambda commit: ""
+    return lambda commit: (check(commit) + ", and " + health + " answers 200") if check(commit) else ""
+
+
+def facts_check(branch):
     url, workflow, cache = setting("SHERIFF_VERSION_URL"), setting("SHERIFF_DEPLOY_WORKFLOW"), {}
     if url:
         sha = served_sha(url)
@@ -350,6 +404,9 @@ COMMENT_MUTATION = "mutation($id:ID!,$body:String!){addComment(input:{subjectId:
 CLOSE_MUTATION = "mutation($id:ID!,$reason:IssueClosedStateReason){closeIssue(input:{issueId:$id,stateReason:$reason}){clientMutationId}}"
 REOPEN_MUTATION = "mutation($id:ID!){reopenIssue(input:{issueId:$id}){clientMutationId}}"
 CREATE_MUTATION = "mutation($input:CreateIssueInput!){createIssue(input:$input){issue{id number url}}}"
+BLOCK_MUTATION = "mutation($issue:ID!,$blocking:ID!){addBlockedBy(input:{issueId:$issue,blockingIssueId:$blocking}){clientMutationId}}"
+ADD_LABEL = "mutation($id:ID!,$labels:[ID!]!){addLabelsToLabelable(input:{labelableId:$id,labelIds:$labels}){clientMutationId}}"
+REMOVE_LABEL = "mutation($id:ID!,$labels:[ID!]!){removeLabelsFromLabelable(input:{labelableId:$id,labelIds:$labels}){clientMutationId}}"
 LABEL_QUERY = "query($owner:String!,$name:String!,$label:String!){repository(owner:$owner,name:$name){label(name:$label){id}}}"
 
 
@@ -397,6 +454,15 @@ def unchanged(item):
     return (node.get("state") == "OPEN", values.get(FIELDS["stage"]), values.get(FIELDS["verify"])) == (item["open"], item["stage"], item["verify"])
 
 
+def audited(item, since):
+    return item["open"] or bool(since) and (item.get("closed") or "") >= since
+
+
+def abandoned(item, prs):
+    return (item["stage"] == "In progress" and bool(prs) and all(pr["state"] == "CLOSED" for pr in prs)
+            and any((pr.get("closed_at") or "") >= item["created"] for pr in prs))
+
+
 def sync(apply, only=None, pages=PAGES):
     known = schema()
     if known["missing"]:
@@ -407,16 +473,21 @@ def sync(apply, only=None, pages=PAGES):
              if item["id"] and (item["open"] or (item["reason"] == "COMPLETED" and item["stage"])) and (not only or item["id"] == only)]
     prs, branch = pull_requests(pages)
     released = release_check(branch)
-    proofs = recorded([item for item in items if item["stage"] == "Verified" and not item["decision"]])
+    since = variable("SHERIFF_WORK_STATE_SINCE")
+    proofs = recorded([item for item in items if item["stage"] == "Verified" and not item["decision"] and audited(item, since)])
     changes = []
     for item in items:
         found = prs.get(item["id"], [])
-        back = unproven(item, found, released, proofs.get(item["node"]))
-        target = back or derive(item, found, released)
+        back = unproven(item, found, released, proofs.get(item["node"])) if audited(item, since) else None
+        target, why = back or derive(item, found, released), REVERT_WHY if back else None
+        if not target and item["open"] and not item["decision"]:
+            if not item["stage"]:
+                target, why = "Candidate", "it had no stage"
+            elif abandoned(item, found):
+                target, why = "Candidate", "its pull requests were closed without merging"
         if not target:
             continue
-        changes.append(dict({"id": item["id"], "number": item["number"], "from": item["stage"], "to": target},
-                            **({"why": "Verified without recorded evidence"} if back else {})))
+        changes.append(dict({"id": item["id"], "number": item["number"], "from": item["stage"], "to": target}, **({"why": why} if why else {})))
         if not apply:
             continue
         if not unchanged(item):
@@ -428,20 +499,32 @@ def sync(apply, only=None, pages=PAGES):
             commit = latest_merge(item, found)["commit"]
             comment(item, "Verified by release: " + released(commit) + ". Verify by is \"Release only\", so no live check is owed.",
                     VERIFIED_MARK.format(commit))
-        set_fields(known, item, stage=target)
+        values = {"stage": target}
+        if target == "Candidate" and not item["verify"]:
+            values["verify"] = "Live check"
+        set_fields(known, item, **values)
+        if target == "Candidate" and item.get("claimed_by") and known.get("claim"):
+            release_claim(known, item)
         if back and not item["open"]:
             reopen(item)
         if target == "Verified" and item["open"]:
             close(item)
-    return {"changes": changes, "applied": bool(apply)}
+    return {"changes": changes, "applied": bool(apply), "audits_closed_since": since or None}
+
+
+def reverts(result):
+    return sum(1 for change in result.get("changes") or [] if change.get("why") == REVERT_WHY)
 
 
 def sync_text(result):
     if result.get("skipped"):
         return result["skipped"]
-    return "\n".join(("" if result["applied"] else "would move ") + "#" + str(change["number"]) + " " + change["id"] + ": " +
-                     str(change["from"] or "no stage") + " -> " + change["to"] + (" (" + change["why"] + ")" if change.get("why") else "") + (" (skipped: " + change["skipped"] + ")" if change.get("skipped") else "")
-                     for change in result["changes"])
+    lines = [("" if result["applied"] else "would move ") + "#" + str(change["number"]) + " " + change["id"] + ": " +
+             str(change["from"] or "no stage") + " -> " + change["to"] + (" (" + change["why"] + ")" if change.get("why") else "") +
+             (" (skipped: " + change["skipped"] + ")" if change.get("skipped") else "") for change in result["changes"]]
+    if reverts(result):
+        lines.append(str(reverts(result)) + " Verified task(s) without recorded evidence " + ("were" if result["applied"] else "would be") + " set back")
+    return "\n".join(lines)
 
 
 def make_id(title, taken):
@@ -455,12 +538,12 @@ def make_id(title, taken):
     return candidate
 
 
-def label_id(name):
+def label_id(name, description="Waits for a person's decision"):
     found = gql(LABEL_QUERY, dict(names(), label=name))["repository"]["label"]
     if found:
         return found["id"]
     return api(["repos/" + REPO + "/labels", "-X", "POST", "-f", "name=" + name, "-f", "color=d4c5f9",
-                "-f", "description=Waits for a person's decision"])["node_id"]
+                "-f", "description=" + description])["node_id"]
 
 
 def read_text(path):
@@ -472,8 +555,12 @@ BOARD_QUERY = """query($login:String!,$title:String!){repositoryOwner(login:$log
 ADD_ITEM = """mutation($project:ID!,$content:ID!){addProjectV2ItemById(input:{projectId:$project,contentId:$content}){item{id}}}"""
 
 
-def board_title(repo):
+def default_board(repo):
     return repo.split("/", 1)[1] + " work"
+
+
+def board_title(repo):
+    return variable("SHERIFF_PROJECT") or default_board(repo)
 
 
 def board_id(title):
@@ -592,6 +679,7 @@ def new_task(known, args):
         if taken(args.id):
             raise WorkError(args.id + " already names an issue")
     task = args.id or make_id(args.title, taken)
+    blockers, blocked = [lookup(name) for name in args.blocked_by], [lookup(name) for name in args.blocks]
     decision = args.type == "Decision"
     payload = {"repositoryId": known["repo"], "title": (task + ": " + args.title.strip())[:256], "body": body,
                "issueFields": field_inputs(known, **({} if decision else {"stage": "Candidate", "verify": args.verify}))}
@@ -603,9 +691,13 @@ def new_task(known, args):
     if board:
         payload["projectV2Ids"] = [board]
     made = gql(CREATE_MUTATION, {"input": payload})["createIssue"]["issue"]
+    links = [(made["id"], entry["node"]) for entry in blockers] + [(entry["node"], made["id"]) for entry in blocked]
+    for issue, blocking in links:
+        gql(BLOCK_MUTATION, {"issue": issue, "blocking": blocking})
     if not decision:
         mirror_status(made["id"], "Candidate")
-    return {"id": task, "number": made["number"], "url": made["url"], "on_board": bool(board)}
+    return {"id": task, "number": made["number"], "url": made["url"], "on_board": bool(board),
+            "blocked_by": [entry["number"] for entry in blockers], "blocks": [entry["number"] for entry in blocked]}
 
 
 def claimant(by):
@@ -639,35 +731,71 @@ def claim(known, item, who):
     return {"ok": True, "number": item["number"], "claimed_by": who}
 
 
+def release_claim(known, item):
+    gql(SET_MUTATION, {"issue": item["node"], "fields": [{"fieldId": claim_field(known), "delete": True}]})
+
+
 def release(known, item, by, force):
-    field, holder = claim_field(known), item["claimed_by"]
+    claim_field(known)
+    holder = item["claimed_by"]
     if holder and not force and holder != claimant(by):
         raise WorkError("#" + str(item["number"]) + " is claimed by " + holder + "; --force releases it anyway")
     if holder:
-        gql(SET_MUTATION, {"issue": item["node"], "fields": [{"fieldId": field, "delete": True}]})
+        release_claim(known, item)
     return {"ok": True, "number": item["number"], "released": holder}
+
+
+def drop(known, item, reason):
+    if not item["open"]:
+        raise WorkError("#" + str(item["number"]) + " is closed")
+    comment(item, "Dropped: " + reason.strip())
+    if item["claimed_by"] and known["claim"]:
+        release_claim(known, item)
+    close(item, "NOT_PLANNED")
+    return {"ok": True, "number": item["number"], "released": item["claimed_by"]}
+
+
+def ask(item, question, people, clear):
+    if clear:
+        if item["asked"]:
+            gql(REMOVE_LABEL, {"id": item["node"], "labels": [label_id(ASK_LABEL, "Waits for a person's answer")]})
+        return {"ok": True, "number": item["number"], "asked": False}
+    if not item["open"]:
+        raise WorkError("#" + str(item["number"]) + " is closed")
+    people = [name.strip().lstrip("@") for entry in (people or [variable("SHERIFF_DECIDERS")]) for name in re.split(r"[\s,]+", entry or "") if name.strip("@ ")]
+    if not people:
+        raise WorkError("whom to ask: pass --to <login> or set SHERIFF_DECIDERS")
+    if not (question or "").strip():
+        raise WorkError("the question is empty")
+    gql(ADD_LABEL, {"id": item["node"], "labels": [label_id(ASK_LABEL, "Waits for a person's answer")]})
+    comment(item, " ".join("@" + name for name in people) + " " + question.strip() + "\n\nReply on this issue; the work waits for your answer.")
+    api(["repos/" + REPO + "/issues/" + str(item["number"]) + "/assignees", "-X", "POST"] + [arg for name in people for arg in ("-f", "assignees[]=" + name)])
+    return {"ok": True, "number": item["number"], "asked": True, "to": people}
 
 
 def blocker_met(blocker, by_number):
     return not blocker["open"] or (by_number.get(blocker["number"]) or {}).get("stage") in ("Released", "Verified")
 
 
-def overview(items):
+def overview(items, busy=frozenset()):
     by_number = {item["number"]: item for item in items if item["open"]}
     work = [item for item in items if item["open"] and not item["decision"] and (item["id"] or item["stage"])]
     blocked = [item for item in work if item["stage"] in ("Candidate", "In progress", None)
                and any(not blocker_met(blocker, by_number) for blocker in item["blocked_by"])]
+    ready = [item for item in work if item["stage"] == "Candidate" and item not in blocked and not item["claimed_by"] and not item["needs_decision"]
+             and not item.get("asked") and item["id"] not in busy]
+    asking = [item for item in items if item["open"] and (item["decision"] or item.get("asked") or item["needs_decision"])]
     return {"replies_waiting": [item for item in items if item["open"] and item["awaits_reply"]],
-            "needs_you": [item for item in items if item["open"] and item["decision"]],
+            "needs_you": sorted(asking, key=priority_key),
             "blocked": blocked,
-            "ready": [item for item in work if item["stage"] == "Candidate" and item not in blocked and not item["claimed_by"] and not item["needs_decision"]],
+            "ready": sorted(ready, key=priority_key),
             "stages": {stage: [item for item in work if item["stage"] == stage] for stage in STAGES},
             "no_stage": [item for item in work if item["stage"] not in STAGES]}
 
 
 def render(view):
     sections = [("A person commented last: read it and reply", view["replies_waiting"]), ("Needs human", view["needs_you"]),
-                ("Blocked", view["blocked"]), ("Ready: unclaimed, unblocked candidates", view["ready"])] + [(stage, view["stages"][stage]) for stage in STAGES] + [("No stage", view["no_stage"])]
+                ("Blocked", view["blocked"]), ("Ready: unclaimed, unblocked candidates without an open pull request", view["ready"])] + [(stage, view["stages"][stage]) for stage in STAGES] + [("No stage", view["no_stage"])]
     lines = []
     for heading, rows in sections:
         lines.append(heading + ": " + str(len(rows)) + (" (first " + str(SHOWN) + " shown; --json lists all)" if len(rows) > SHOWN else ""))
@@ -685,8 +813,10 @@ def run(args):
     if command == "board-status":
         return board_status(args.project or board_title(REPO), args.apply)
     if command == "status":
-        view = overview(issues("OPEN"))
+        view = overview(issues("OPEN"), set(pull_requests(merged=False)[0]))
         return view if args.json else render(view)
+    if command == "show":
+        return lookup(args.task)
     if command == "reply":
         body = read_text(args.body_file).strip()
         if not body:
@@ -704,6 +834,10 @@ def run(args):
         return claim(known, item, claimant(args.by))
     if command == "release":
         return release(known, item, args.by, args.force)
+    if command == "drop":
+        return drop(known, item, args.reason)
+    if command == "ask":
+        return ask(item, args.question, args.to, args.clear)
     if command == "set":
         if args.stage is None and args.verify is None and args.next is None:
             raise WorkError("nothing to set: pass --stage, --next or --verify")
@@ -719,10 +853,14 @@ def run(args):
         if len(evidence) < EVIDENCE_MIN:
             raise WorkError("the evidence must say what was exercised in production and what was observed")
         prs, branch = pull_requests()
-        merge = latest_merge(item, prs.get(item["id"], []))
-        if not (merge and merge["commit"] and release_check(branch)(merge["commit"])):
+        found = prs.get(item["id"], [])
+        merges = {pr["number"]: pr for pr in [pr for pr in found if pr["state"] == "MERGED"] + task_merges(item["id"], branch)}
+        merge = latest_merge(item, list(merges.values()))
+        if not merge and any(pr["state"] == "OPEN" for pr in found):
+            raise WorkError("#" + str(item["number"]) + " has an open pull request and no released merge, so there is nothing released to verify")
+        if merge and not (merge["commit"] and release_check(branch)(merge["commit"])):
             raise WorkError("#" + str(item["number"]) + " has no merge into the default branch known to be released, so there is no released commit to verify")
-        comment(item, "## Verified in production\n\n" + evidence, VERIFIED_MARK.format(merge["commit"]))
+        comment(item, "## Verified in production\n\n" + evidence, VERIFIED_MARK.format(merge["commit"] if merge else NO_MERGE))
         set_fields(known, item, stage="Verified", next_action="")
         if item["open"]:
             close(item)
@@ -739,7 +877,9 @@ def add_commands(parser):
     new.add_argument("--type", choices=TYPES, default="Task")
     new.add_argument("--verify", choices=VERIFY, default="Live check", help="how the work is verified (default: Live check)")
     new.add_argument("--body-file", help="the issue body; - reads standard input")
-    new.add_argument("--project", help="the board the task joins (default: the repository's name plus ' work')")
+    new.add_argument("--project", help="the board the task joins (default: SHERIFF_PROJECT, else the repository's name plus ' work')")
+    new.add_argument("--blocked-by", action="append", default=[], metavar="TASK", help="a task or #issue this one waits for (repeatable)")
+    new.add_argument("--blocks", action="append", default=[], metavar="TASK", help="a task or #issue that waits for this one (repeatable)")
     change = sub.add_parser("set", parents=[common], help="set what pull requests and releases cannot show")
     change.add_argument("task", help="task id or #issue number")
     change.add_argument("--stage", choices=STAGES)
@@ -755,6 +895,16 @@ def add_commands(parser):
     released.add_argument("task", help="task id or #issue number")
     released.add_argument("--by", help="who releases it (default: SHERIFF_AGENT, else your gh login)")
     released.add_argument("--force", action="store_true", help="release someone else's claim")
+    asked = sub.add_parser("ask", parents=[common], help="ask a person a question: label, @mention and assign them; the task leaves ready until cleared")
+    asked.add_argument("task", help="task id or #issue number")
+    asked.add_argument("--question", help="what the person must answer")
+    asked.add_argument("--to", action="append", help="login to ask (repeatable; default: SHERIFF_DECIDERS)")
+    asked.add_argument("--clear", action="store_true", help="the question is answered: remove the label")
+    shown = sub.add_parser("show", parents=[common], help="one task as JSON")
+    shown.add_argument("task", help="task id or #issue number")
+    dropped = sub.add_parser("drop", parents=[common], help="close a task as not planned, with the reason, and release its claim")
+    dropped.add_argument("task", help="task id or #issue number")
+    dropped.add_argument("--reason", required=True)
     status = sub.add_parser("status", parents=[common], help="open work by stage, ready tasks, and issues where a person commented last")
     status.add_argument("--json", action="store_true")
     reply = sub.add_parser("reply", parents=[common], help="answer a person's comment on an issue")
@@ -766,7 +916,7 @@ def add_commands(parser):
     synced.add_argument("--pages", type=int, default=PAGES, help="pages of 100 recent merged pull requests and closed issues to read")
     cleared = sub.add_parser("board-status", parents=[common], help="backfill: set the board's built-in Status to each item's Stage where they differ")
     cleared.add_argument("--apply", action="store_true", help="write the changes (default: only report them)")
-    cleared.add_argument("--project", help="the board (default: the repository's name plus ' work')")
+    cleared.add_argument("--project", help="the board (default: SHERIFF_PROJECT, else the repository's name plus ' work')")
     return parser
 
 

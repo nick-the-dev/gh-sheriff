@@ -124,7 +124,9 @@ gh sheriff doctor --repo owner/name
 5. Turns on auto-merge and creates a ruleset named `Sheriff` on the default branch. It requires a pull request,
    `Review` and `Merge gate`, and every review thread resolved, and it blocks deletion and force-pushes. Your existing
    required checks are kept.
-6. Adds four issue fields to your account and a Projects board named `<repo> work` (skip with `--no-work-state`).
+6. Adds four issue fields to your account and a Projects board named `<repo> work`, or the existing board you name with
+   `--project-name` (saved as `SHERIFF_PROJECT`), then turns work state on and sets `SHERIFF_WORK_STATE_SINCE` (skip
+   with `--no-work-state`).
 
 ## Updates
 
@@ -317,9 +319,12 @@ cost, and exits with an error when the share of tokens without cache reads is ab
 | `gh sheriff doctor` | Check the setup and print what to fix. Flags: `--repo`, `--no-work-state`, `--project-name` |
 | `gh sheriff models` | Choose the cheap and the smart reviewer. Flags: `--repo`, `--first-pass`, `--review-model`, `--rotate-secrets` |
 | `gh sheriff stats` | Show review and plan usage and cost. Flags: `--repo`, `--prs` (default 50), `--limit` (default 10) |
-| `gh sheriff task new "<title>"` | Create a task issue at Stage Candidate and add it to the board. Flags: `--id`, `--type`, `--verify` (default Live check), `--body-file`, `--project` |
+| `gh sheriff task new "<title>"` | Create a task issue at Stage Candidate and add it to the board. Flags: `--id`, `--type`, `--verify` (default Live check), `--body-file`, `--project`, `--blocked-by <ID>` and `--blocks <ID>` (repeatable) |
+| `gh sheriff task show <ID>` | Print one task as JSON, with the same fields as `status --json` |
 | `gh sheriff task set <ID>` | Set fields Sheriff can't infer: `--stage Parked`, `--next "..."`, `--verify` |
-| `gh sheriff task verify <ID> --evidence-file F` | Record what was checked in production; sets Verified and closes the issue |
+| `gh sheriff task verify <ID> --evidence-file F` | Record what was checked in production; sets Verified and closes the issue. Work without a pull request can be verified once its Stage is Released |
+| `gh sheriff task ask <ID> --question "..."` | Ask a person: labels the issue `sheriff:needs-person`, @mentions and assigns them; the task leaves `ready` until `--clear`. Flags: `--to <login>` (repeatable; default `SHERIFF_DECIDERS`), `--clear` |
+| `gh sheriff task drop <ID> --reason "..."` | Close a task as not planned with the reason as a comment, and release its claim |
 | `gh sheriff task claim <ID>` | Record who works on a task before the work starts; exits 1 if someone else holds it. Flags: `--by` (default `SHERIFF_AGENT`, else your gh login) |
 | `gh sheriff task release <ID>` | Clear a task's claim. Flags: `--by`, `--force` (someone else's claim) |
 | `gh sheriff task status` | List open tasks by stage, ready and blocked tasks, and comments waiting for a reply (`--json` for agents) |
@@ -344,14 +349,16 @@ All settings are optional repository variables.
 | `SHERIFF_PLAN_WEB` | `search` | `search`, `allowlist` or `any` ([Planning](#planning)) |
 | `SHERIFF_PLAN_FETCH_DOMAINS` | none | Comma-separated domains the planner may fetch, with `allowlist` |
 | `SHERIFF_VERSION_URL` | none | A URL returning JSON with the deployed commit as `sha`, used for `Merge gate` and Released |
-| `SHERIFF_HEALTH_URL` | none | `Merge gate` fails unless this URL returns 200 |
+| `SHERIFF_HEALTH_URL` | none | `Merge gate` fails, and no task becomes Released, unless this URL returns 200 |
 | `SHERIFF_DEPLOY_WORKFLOW` | none | Deploy workflow file. Serial: `Merge gate` waits for its run on the default branch's head and fails if that run did not succeed. Bundle: see [Merges](#merges) |
 | `SHERIFF_OVERRIDE` | none | A pull request number that may merge despite failing production checks or a full bundle |
 | `SHERIFF_MERGE_MODE` | `serial` | `bundle` lets up to `SHERIFF_BUNDLE_MAX` merged pull requests wait for one deploy; anything else is serial ([Merges](#merges)) |
 | `SHERIFF_BUNDLE_MAX` | `5` | Merged pull requests one deploy may carry in bundle mode; anything but a whole number of at least 1 means 5 |
 | `SHERIFF_ACK_AUTHORS` | none | Logins, besides bots, that count as agents when replying to comments and as trusted authors for planning |
 | `SHERIFF_UNLOCK_AUTHORS` | none | Logins, besides admins and maintainers, who may grant an extra review (`/sheriff review`) or plan (`/sheriff plan`) |
-| `SHERIFF_DECIDERS` | the issue's author | People asked when a plan needs a decision, and who may answer it besides admins and maintainers ([Planning](#planning)) |
+| `SHERIFF_DECIDERS` | the issue's author | People asked when a plan needs a decision, and who may answer it besides admins and maintainers ([Planning](#planning)); also whom `task ask` asks without `--to` |
+| `SHERIFF_PROJECT` | `<repo> work` | Title of the work board; `install --project-name` sets it |
+| `SHERIFF_WORK_STATE_SINCE` | set by `install` | Verified issues closed before this time (UTC) are not audited for evidence, so turning work state on never reopens old work. Without it, closed issues are not audited |
 | `SHERIFF_RUNS_ON` | `ubuntu-latest` | Runner label for the gate, reviews, plans and work state ([Runners and Actions minutes](#runners-and-actions-minutes)) |
 | `SHERIFF_SMART_SHARE_LIMIT` | `10` | Target smart-model share in percent for `gh sheriff stats` |
 | `SHERIFF_RELAY_RUNS_ON` | `ubuntu-latest` | Runner label for the relay |
@@ -406,16 +413,23 @@ Sheriff updates `Stage` on its own:
 
 | Event | New stage |
 |---|---|
+| An open task issue has no Stage (for example one opened by hand) | Candidate, with Verify by "Live check" if empty |
 | A pull request for the task is opened | In progress |
+| Every pull request of an In progress task was closed without merging | Candidate, and its claim is released |
 | The pull request is merged | Merged |
-| Production serves the merged commit, or the deploy succeeds (with no deploy configured: on merge) | Released |
+| Production serves the merged commit, or the deploy succeeds (with no deploy configured: on merge), and `SHERIFF_HEALTH_URL` (if set) returns 200 | Released |
 | `gh sheriff task verify` records evidence, or the task is "Release only" and was released | Verified |
 
-Stages only move forward, with two exceptions: a Parked task moves to In progress when a pull request opens (merges
-don't advance it), and Verified without recorded evidence moves back on the next sync, which reopens the issue.
-`task verify` works only from Released, and `task set` can't set Verified. Pull requests from forks are ignored.
+Stages only move forward, with three exceptions: a Parked task moves to In progress when a pull request opens (merges
+don't advance it), abandoned work returns to Candidate (above), and Verified without recorded evidence moves back on the
+next sync, which reopens a closed issue. That audit covers open issues and issues closed after
+`SHERIFF_WORK_STATE_SINCE`, which `install` sets when it turns work state on, so history from before Sheriff tracked the
+work is left alone; `gh sheriff doctor` and `gh sheriff task sync` (a dry run) say how many tasks the next sync would set
+back. `task verify` works only from Released, and `task set` can't set Verified. `task verify` looks for the task's
+merge among recent pull requests and by searching for its ID; work with no merge (a setting changed by hand) records its
+evidence without a commit. The sync also runs when an issue is opened or retitled. Pull requests from forks are ignored.
 
-The board's built-in `Status` mirrors `Stage` only when a `gh` login with Projects access writes it (`task set`,
+The board is `<repo> work` unless `SHERIFF_PROJECT` names another. Its built-in `Status` mirrors `Stage` only when a `gh` login with Projects access writes it (`task set`,
 `task verify`, `task board-status --apply`). CI's sync runs with the job token, which can't write Projects, so run
 `task board-status --apply` to catch up. The board's Auto-add has to be switched on in the browser, because GitHub has no API for it; `install` opens the
 page for you.
@@ -433,8 +447,16 @@ gh sheriff task claim LOGIN-FIX               # exits 1 if someone else holds it
 git switch -c ai/LOGIN-FIX                    # then push and open the pull request
 ```
 
-- `ready` lists Candidates that are not blocked, not claimed and not labelled `sheriff:needs-decision`. The board's
-  Ready view doesn't hide claimed tasks; agents should pick from `ready`.
+- `ready` lists Candidates that are not blocked, not claimed, have no open pull request and are not labelled
+  `sheriff:needs-decision` or `sheriff:needs-person`, most urgent first: by `priority:P0`...`priority:P3` label (none
+  counts as P2), then oldest first. The board's Ready view doesn't hide claimed tasks; agents should pick from `ready`.
+- `needs_you` lists open Decision issues and issues labelled `sheriff:needs-decision` or `sheriff:needs-person`, in the
+  same order. An agent that needs a person's answer runs `task ask <ID> --question "..."`, reads the reply on the issue,
+  and runs `task ask <ID> --clear` once it is answered.
+- Each item in `status --json` (and `task show`) has `id`, `number`, `title`, `url`, `open`, `reason`, `created`,
+  `updated`, `closed`, `type`, `priority`, `decision`, `needs_decision`, `asked`, `stage`, `verify`, `next`,
+  `claimed_by`, `assignees`, `blocked_by` (`number`, `open`, `title`) and `awaits_reply`. The top-level keys are
+  `replies_waiting`, `needs_you`, `blocked`, `ready`, `stages` (one list per Stage) and `no_stage`.
 - `claim` writes the claimant into `Claimed by`. It is refused when someone else holds the task, and changes nothing
   when you already do, so run it again before you push: it succeeds only while the task is still yours.
 - The claimant is `--by`, else `SHERIFF_AGENT`, else your gh login. An agent that acts as a GitHub App has no login,
@@ -442,8 +464,8 @@ git switch -c ai/LOGIN-FIX                    # then push and open the pull requ
 - Every item in `status --json` carries `claimed_by`, so a dispatcher can list its own work and leave other owners'
   tasks and pull requests alone: `jq --arg me "$SHERIFF_AGENT" '[.stages[][] | select(.claimed_by == $me)]'`.
   `status` without `--json` shows `[claimed by ...]`.
-- `release` clears your claim and `--force` clears anyone's. Release a task you give up; if its pull request already
-  moved it on, also `task set <ID> --stage Candidate`.
+- `release` clears your claim and `--force` clears anyone's. Release a task you give up; if its pull request was
+  closed, the next sync returns it to Candidate and releases the claim itself. `task drop` closes a task you won't do.
 - A claim stays when the pull request merges or the issue closes, as a record of who did the task. Claims don't
   expire: a stuck one shows in `status`, and `release --force` clears it.
 - GitHub can't make the claim atomic. `claim` writes, waits 3 seconds, reads the field back and fails if another name
