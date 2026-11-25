@@ -28,7 +28,7 @@ PLAN_MARKER = re.compile(r"<!--\s*sheriff-plan\s+v=(\d+)\s+base=([0-9a-f]{40})(?
 START_MARKER = re.compile(r"<!--\s*sheriff-plan-start\s+v=(\d+)\s*-->")
 FAILED_MARKER = re.compile(r"<!--\s*sheriff-plan-failed\s+v=(\d+)\s*-->")
 BUDGET_MARKER = "<!-- sheriff-plan-budget -->"
-DECISION_MARKER = re.compile(r"<!--\s*sheriff-decision\s+v=(\d+)\s*-->")
+DECISION_MARKER = re.compile(r"<!--\s*sheriff-decision\s+v=(\d+)(?:\s+closed-by=(\d+))?\s*-->")
 PLAN_COMMAND = re.compile(r"^\s*/sheriff plan\s*$")
 REPLAN_COMMAND = re.compile(r"^\s*/sheriff replan\s+(\S[\s\S]*?)\s*$")
 STALE_MINUTES = 30
@@ -241,7 +241,8 @@ def escape(text):
 
 def supersede(body, newer):
     head, _, rest = str(body).partition("\n")
-    return head.rstrip().removesuffix("-->").rstrip() + " superseded-by=" + str(newer) + " -->\n**Superseded by v" + str(newer) + ".**\n" + rest
+    closed = " Its question is closed: v" + str(newer) + " holds the current answer." if decision_of(body) else ""
+    return head.rstrip().removesuffix("-->").rstrip() + " superseded-by=" + str(newer) + " -->\n**Superseded by v" + str(newer) + ".**" + closed + "\n" + rest
 
 
 def failure_note(version, why, planned=False):
@@ -274,6 +275,13 @@ def section_of(text, name):
 def decision_of(text):
     question = section_of(text, "Decision needed")
     return "" if re.match(r"[-*_`>\s]*none\b", question, re.I) else question
+
+
+def closed_note(question, version, newer, asks_again, requester):
+    lead = ("**Replaced.** Plan v" + str(newer) + " asks the question again, in a new comment." if asks_again else
+            "**Answered.** Plan v" + str(newer) + " follows the answer" + (" from " + bare(requester) if requester else "") + ", so no decision is open.")
+    return ("<!-- sheriff-decision v=" + str(version) + " closed-by=" + str(newer) + " -->\n" + lead + "\n\n<details><summary>The question plan v"
+            + str(version) + " asked</summary>\n\n" + escape(question)[:DECISION_LIMIT].strip() + "\n\n</details>")
 
 
 def decision_note(version, question, who):
@@ -716,8 +724,17 @@ def post(args):
             apply_priority(args.issue, level, slug)
         except PlanError as exc:
             print(json.dumps({"ok": False, "warning": "priority label of issue " + str(args.issue) + ": " + str(exc)}), file=sys.stderr, flush=True)
+    question = decision_of(record["text"])
+    earlier = {str(item["version"]): decision_of(item["body"]) for item in plans(issue["comments"], slug)}
+    for asked in issue["comments"]:
+        found = DECISION_MARKER.match(first_line(asked["body"])) if asked["bot"] and bare(asked["author"]) == slug else None
+        if found and not found.group(2) and int(found.group(1)) < args.version:
+            try:
+                patch_comment(asked["id"], closed_note(earlier.get(found.group(1), ""), found.group(1), args.version, bool(question), record.get("requester")))
+            except PlanError as exc:
+                warning("decision of issue " + str(args.issue) + ": the earlier question was not closed: " + str(exc))
     try:
-        apply_decision(issue, args.version, decision_of(record["text"]), logins(args.deciders))
+        apply_decision(issue, args.version, question, logins(args.deciders))
     except PlanError as exc:
         warning("decision of issue " + str(args.issue) + ": " + str(exc))
     prs = ""

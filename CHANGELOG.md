@@ -20,6 +20,8 @@ release is made.
 - **A reply is the answer.** A reply from an admin, a maintainer or a login in `SHERIFF_DECIDERS` on a labelled issue
   writes the next plan from that answer; once no question is left, Sheriff removes the label. This needs the 1.1.0
   workflow file (see Upgrading); until then, comment `/sheriff replan <your answer>`.
+- Once a newer plan settles a question, the earlier question comment is marked **Answered** (with who answered) or
+  **Replaced**, and the superseded plan says its question is closed, so no old comment still reads as an open decision.
 - **The planner sees pictures.** Images attached to the issue or to a trusted comment (GitHub attachments only, at most
   10, 5 MB each, PNG, JPEG, GIF or WebP) are downloaded for the planner, which looks at them. Pictures it could not
   read are reported in the plan.

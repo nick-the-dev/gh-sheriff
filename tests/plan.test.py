@@ -843,7 +843,7 @@ class DecisionPostTests(StepTests):
                 return {"id": 900}
             return []
         with mock.patch.object(plan, "read_issue", return_value=issue), mock.patch.object(plan, "gh_json", side_effect=gh), \
-             mock.patch.object(plan, "run", side_effect=lambda args, cwd=None: runs.append(list(args)) or ""), \
+             mock.patch.object(plan, "run", side_effect=lambda args, cwd=None: runs.append(list(args) + [pathlib.Path(a[6:]).read_text() for a in args if a.startswith("body=@")]) or ""), \
              mock.patch.object(plan, "output", side_effect=lambda **v: outs.append(v)), mock.patch("sys.stderr") as err, \
              mock.patch.dict(os.environ, {"GH_REPO": "o/r", "GH_ACTOR_LOGIN": APP + "[bot]"}):
             code = plan.main(["post", "--record", str(path), "--issue", "12", "--version", "2", "--comment-id", "55", "--deciders", deciders])
@@ -874,6 +874,26 @@ class DecisionPostTests(StepTests):
         self.assertIn(["api", "-X", "DELETE", "repos/{owner}/{repo}/issues/12/labels/sheriff%3Aneeds-decision"], calls)
         runs, calls, notes, _ = self.posted(task([planned(1), reservation(2)]), CommentTests.RECORD)
         self.assertFalse(any("DELETE" in c for c in calls))
+
+    def test_a_settling_plan_closes_the_earlier_question_and_its_superseded_plan_says_so(self):
+        runs, _, notes, _ = self.posted(task([asking(1), asked(1), note("boss", "A", "2026-11-22T11:00:00Z"), reservation(2)]), dict(CommentTests.RECORD, requester="boss"))
+        edits = {r[4].rsplit("/", 1)[1]: r[-1] for r in runs if r[:4] == ["gh", "api", "-X", "PATCH"]}
+        self.assertEqual(notes, [])
+        self.assertTrue(edits["201"].startswith("<!-- sheriff-decision v=1 closed-by=2 -->\n**Answered.** Plan v2 follows the answer from boss"))
+        self.assertIn("Pick A or B?", edits["201"].split("<details>", 1)[1])
+        self.assertNotIn("@boss", edits["201"])
+        self.assertEqual(edits["101"].splitlines()[1], "**Superseded by v2.** Its question is closed: v2 holds the current answer.")
+
+    def test_a_plan_that_asks_again_marks_the_earlier_question_replaced(self):
+        runs, _, notes, _ = self.posted(task([asking(1), asked(1), reservation(2)]), self.record(self.QUESTION))
+        edits = {r[4].rsplit("/", 1)[1]: r[-1] for r in runs if r[:4] == ["gh", "api", "-X", "PATCH"]}
+        self.assertTrue(edits["201"].startswith("<!-- sheriff-decision v=1 closed-by=2 -->\n**Replaced.** Plan v2 asks the question again"))
+        self.assertEqual(len(notes), 1)
+
+    def test_a_closed_question_is_left_alone(self):
+        closed = note(APP + "[bot]", "<!-- sheriff-decision v=1 closed-by=2 -->\n**Answered.**", "2026-11-22T10:06:00Z", True, None, 201)
+        runs, _, _, _ = self.posted(task([asking(1), closed, reservation(2)]), CommentTests.RECORD)
+        self.assertNotIn("201", [r[4].rsplit("/", 1)[1] for r in runs if r[:4] == ["gh", "api", "-X", "PATCH"]])
 
     def test_a_failed_label_or_question_write_still_posts_the_plan_with_a_warning(self):
         _, _, notes, err = self.posted(task([planned(1), reservation(2)]), self.record(self.QUESTION), fail=True)
