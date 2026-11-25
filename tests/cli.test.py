@@ -134,7 +134,7 @@ class TaskWiringTests(unittest.TestCase):
 
 
 def issue_field(name):
-    kind = "IssueFieldText" if name == "Next action" else "IssueFieldSingleSelect"
+    kind = "IssueFieldText" if name in ("Next action", "Claimed by") else "IssueFieldSingleSelect"
     options = {"Stage": cli.WORK.STAGES, "Verify by": cli.WORK.VERIFY}.get(name, ())
     return {"__typename": kind, "id": "IF-" + name, "name": name, **({"options": [{"name": o} for o in options]} if options else {})}
 
@@ -144,6 +144,7 @@ def repository(fields=(), types=("Task",), kind="Organization"):
             "issueTypes": {"nodes": [{"name": name} for name in types]}, "issueFields": {"nodes": [issue_field(name) for name in fields]}}
 
 
+ALL_FIELDS = ("Stage", "Verify by", "Next action", "Claimed by")
 ORG = {"repo": "o/r", "owner": "o", "kind": "Organization"}
 USER = {"repo": "me/r", "owner": "me", "kind": "User"}
 
@@ -166,21 +167,27 @@ class IssueFieldInstallTests(unittest.TestCase):
 
     def test_only_missing_fields_are_created_on_the_owner_with_their_options(self):
         created, out = self.run_fields(ORG, ["Stage"])
-        self.assertEqual([(f["name"], f["dataType"], f["ownerId"]) for f in created], [("Verify by", "SINGLE_SELECT", "O1"), ("Next action", "TEXT", "O1")])
+        self.assertEqual([(f["name"], f["dataType"], f["ownerId"]) for f in created],
+                         [("Verify by", "SINGLE_SELECT", "O1"), ("Next action", "TEXT", "O1"), ("Claimed by", "TEXT", "O1")])
         self.assertEqual([o["name"] for o in created[0]["options"]], list(cli.WORK.VERIFY))
         self.assertEqual([o["priority"] for o in created[0]["options"]], [1, 2, 3])
         self.assertNotIn("options", created[1])
         self.assertIn("ok  issue fields", out)
 
     def test_nothing_is_created_when_all_exist(self):
-        self.assertEqual(self.run_fields(ORG, ["Stage", "Verify by", "Next action"])[0], [])
+        self.assertEqual(self.run_fields(ORG, list(ALL_FIELDS))[0], [])
+
+    def test_an_install_from_before_claims_gets_only_the_claim_field(self):
+        created, out = self.run_fields(ORG, ["Stage", "Verify by", "Next action"])
+        self.assertEqual([f["name"] for f in created], ["Claimed by"])
+        self.assertIn("ok  issue fields Stage, Verify by, Next action, Claimed by exist", out)
 
     def test_a_refused_creation_names_the_scope_to_add(self):
         self.assertIn("gh auth refresh -s admin:org", self.run_fields(ORG, [], fail=True)[1])
         self.assertIn("gh auth refresh -s user", self.run_fields(USER, [], fail=True)[1])
 
     def test_wrong_kinds_and_missing_options_are_problems(self):
-        found = repository(["Stage", "Verify by", "Next action"])
+        found = repository(ALL_FIELDS)
         found["issueFields"]["nodes"][0]["options"] = [{"name": "Candidate"}]
         found["issueFields"]["nodes"][2]["__typename"] = "IssueFieldSingleSelect"
         problems = cli.field_problems(found)
@@ -210,7 +217,7 @@ class ProjectInstallTests(unittest.TestCase):
             if "node(id" in query:
                 return {"node": detail}
             return {}
-        fields_repo = repository(["Stage", "Verify by", "Next action"], types, info["kind"])
+        fields_repo = repository(ALL_FIELDS, types, info["kind"])
         with mock.patch.object(cli.WORK, "gql", fake), mock.patch.object(cli, "gh_json", lambda args, stdin=None: posted.append((args, json.loads(stdin)))), \
                 mock.patch.object(cli, "ensure_status_options", lambda project: None), \
                 mock.patch("sys.stdout", out):
@@ -224,7 +231,7 @@ class ProjectInstallTests(unittest.TestCase):
         self.assertEqual(project["id"], "P1")
         self.assertNotIn("createProjectV2(", markers)
         self.assertEqual(markers.count("linkProjectV2ToRepository"), 1)
-        self.assertEqual([v["input"]["issueFieldId"] for m, v in calls if m == "createProjectV2IssueField"], ["IF-Verify by", "IF-Next action"])
+        self.assertEqual([v["input"]["issueFieldId"] for m, v in calls if m == "createProjectV2IssueField"], ["IF-Verify by", "IF-Next action", "IF-Claimed by"])
         self.assertEqual([body["name"] for _, body in posted], ["Needs human", "Blocked", "In flight", "Awaiting verification", "All open by stage"])
         self.assertTrue(all(args[3] == "users/me/projectsV2/3/views" for args, _ in posted))
         bodies = {body["name"]: body for _, body in posted}
@@ -234,7 +241,7 @@ class ProjectInstallTests(unittest.TestCase):
         self.assertEqual(bodies["Needs human"]["visible_fields"][:2], [1, 2])
 
     def test_a_missing_project_is_created_for_the_owner_and_the_repository(self):
-        project, calls, posted, _ = self.run_project(ORG, [], [("Stage", True), ("Verify by", True), ("Next action", True)], linked=True, types=("Task", "Decision"))
+        project, calls, posted, _ = self.run_project(ORG, [], [(name, True) for name in ALL_FIELDS], linked=True, types=("Task", "Decision"))
         created = next(v for m, v in calls if m == "createProjectV2(")
         self.assertEqual(created["input"], {"ownerId": "O1", "title": "r work", "repositoryId": "R1"})
         self.assertNotIn("linkProjectV2ToRepository", [m for m, _ in calls])
@@ -244,12 +251,12 @@ class ProjectInstallTests(unittest.TestCase):
     def test_everything_present_changes_nothing(self):
         names = [view[0] for view in cli.view_specs(1, "")]
         project, calls, posted, _ = self.run_project(ORG, [{"id": "P1", "number": 3, "title": "r work", "url": "u"}],
-                                                     [("Stage", True), ("Verify by", True), ("Next action", True)], views=names, linked=True)
+                                                     [(name, True) for name in ALL_FIELDS], views=names, linked=True)
         self.assertEqual(([m for m, _ in calls], posted), (["projectsV2(first", "node(id"], []))
 
     def test_a_project_field_of_the_same_name_blocks_the_views(self):
         project, calls, posted, out = self.run_project(ORG, [{"id": "P1", "number": 3, "title": "r work", "url": "u"}],
-                                                       [("Stage", False), ("Verify by", True), ("Next action", True)], linked=True)
+                                                       [("Stage", False), ("Verify by", True), ("Next action", True), ("Claimed by", True)], linked=True)
         self.assertEqual(posted, [])
         self.assertIn("its own field 'Stage'", out)
 
@@ -443,7 +450,7 @@ class AutoAddTests(unittest.TestCase):
                 return self.workflows(False)
             if "projectsV2" in query:
                 return {"repositoryOwner": {"projectsV2": {"nodes": [{"id": "P1", "title": "r work", "url": "u"}]}}}
-            return {"repository": repository(["Stage", "Verify by", "Next action"])}
+            return {"repository": repository(ALL_FIELDS)}
         with mock.patch.object(cli.WORK, "gql", fake):
             self.assertEqual(cli.work_state_problems(ORG, "r work"), ["'Auto-add to project' is off on the board: turn it on at u/workflows"])
 
@@ -454,13 +461,13 @@ class WorkStateDoctorTests(unittest.TestCase):
             return {"repositoryOwner": {"projectsV2": {"nodes": [{"title": "Other"}]}}} if "projectsV2" in query else {"repository": repository(["Stage"])}
         with mock.patch.object(cli.WORK, "gql", fake):
             problems = cli.work_state_problems(ORG, "r work")
-        self.assertEqual(problems, ["no issue field 'Verify by'", "no issue field 'Next action'", "no project 'r work' owned by o"])
+        self.assertEqual(problems, ["no issue field 'Verify by'", "no issue field 'Next action'", "no issue field 'Claimed by'", "no project 'r work' owned by o"])
 
     def test_unreadable_projects_name_the_scope(self):
         def fake(query, variables=None):
             if "projectsV2" in query:
                 raise cli.WORK.WorkError("INSUFFICIENT_SCOPES")
-            return {"repository": repository(["Stage", "Verify by", "Next action"])}
+            return {"repository": repository(ALL_FIELDS)}
         with mock.patch.object(cli.WORK, "gql", fake):
             self.assertIn("gh auth refresh -s project", cli.work_state_problems(ORG, "r work")[0])
 

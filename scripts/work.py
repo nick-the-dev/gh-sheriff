@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Sheriff work state: one issue per task; its Stage, Verify by and Next action issue fields move with pull requests and releases."""
+"""Sheriff work state: one issue per task; its Stage, Verify by and Next action issue fields move with pull requests and releases, and Claimed by names who works on it."""
 import argparse
 import http.client
 import json
@@ -7,6 +7,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -16,6 +17,8 @@ DERIVED = ("In progress", "Merged", "Released")
 VERIFY = ("Release only", "Live check", "Awaits event")
 TYPES = ("Task", "Bug", "Feature", "Decision")
 FIELDS = {"stage": "Stage", "verify": "Verify by", "next": "Next action"}
+CLAIM_FIELD = "Claimed by"
+CLAIM_SETTLE = 3
 ID = r"[A-Z][A-Z0-9-]+"
 ID_RE = re.compile(ID)
 ISSUE_TITLE_RE = re.compile(r"^(" + ID + r"): ")
@@ -25,6 +28,7 @@ AGENT_MARK = "<!-- sheriff-ack -->"
 VERIFIED_MARK = "<!-- sheriff-verified sha={} -->"
 VERIFIED_RE = re.compile(r"<!-- sheriff-verified sha=([0-9a-f]{40}) -->")
 DECISION_LABEL = "decision"
+NEEDS_DECISION_LABEL = "sheriff:needs-decision"
 STOP_WORDS = frozenset("a an and as at be by for from in into is it of on or the to with".split())
 PAGES = 2
 RESERVE = 100
@@ -117,7 +121,7 @@ def schema():
     repository = data["repository"]
     fields = {node["name"]: node for node in repository["issueFields"]["nodes"] if node.get("name")}
     return {"repo": repository["id"], "types": {node["name"]: node["id"] for node in repository["issueTypes"]["nodes"]},
-            "fields": {key: fields.get(label) for key, label in FIELDS.items()},
+            "fields": {key: fields.get(label) for key, label in FIELDS.items()}, "claim": fields.get(CLAIM_FIELD),
             "missing": [label for label in FIELDS.values() if label not in fields], "remaining": (data.get("rateLimit") or {}).get("remaining")}
 
 
@@ -173,8 +177,9 @@ def to_item(node):
     return {"id": match.group(1) if match else None, "node": node["id"], "number": node["number"],
             "title": title[len(match.group(0)):] if match else title, "open": node.get("state") == "OPEN",
             "reason": node.get("stateReason"), "url": node.get("url"), "created": node.get("createdAt") or "", "type": kind,
-            "decision": kind == "Decision" or DECISION_LABEL in labels,
+            "decision": kind == "Decision" or DECISION_LABEL in labels, "needs_decision": NEEDS_DECISION_LABEL in labels,
             "stage": values.get(FIELDS["stage"]), "verify": values.get(FIELDS["verify"]), "next": values.get(FIELDS["next"]),
+            "claimed_by": values.get(CLAIM_FIELD),
             "blocked_by": [{"number": b["number"], "open": b.get("state") == "OPEN"} for b in (node.get("blockedBy") or {}).get("nodes") or []],
             "awaits_reply": awaits_reply((node.get("comments") or {}).get("nodes") or [])}
 
@@ -603,6 +608,46 @@ def new_task(known, args):
     return {"id": task, "number": made["number"], "url": made["url"], "on_board": bool(board)}
 
 
+def claimant(by):
+    who = (by or setting("SHERIFF_AGENT")).strip()
+    if not who:
+        found = gh(["api", "user", "--jq", ".login"])
+        who = found.stdout.strip() if found.returncode == 0 else ""
+    if not who:
+        raise WorkError("cannot tell who you are: pass --by <name> or set SHERIFF_AGENT (a GitHub App token has no user login)")
+    return who
+
+
+def claim_field(known):
+    if not known["claim"]:
+        raise WorkError("the repository has no issue field " + CLAIM_FIELD + ": run gh sheriff install")
+    return known["claim"]["id"]
+
+
+def claim(known, item, who):
+    field, number = claim_field(known), "#" + str(item["number"])
+    if not item["open"]:
+        raise WorkError(number + " is closed")
+    if item["claimed_by"] and item["claimed_by"] != who:
+        raise WorkError(number + " is claimed by " + item["claimed_by"] + "; pick another task")
+    if item["claimed_by"] != who:
+        gql(SET_MUTATION, {"issue": item["node"], "fields": [{"fieldId": field, "textValue": who}]})
+        time.sleep(CLAIM_SETTLE)
+        holder = field_values(gql(FRESH_QUERY, {"id": item["node"]})["node"] or {}).get(CLAIM_FIELD)
+        if holder != who:
+            raise WorkError(number + " was claimed by " + str(holder or "someone else") + " at the same time; pick another task")
+    return {"ok": True, "number": item["number"], "claimed_by": who}
+
+
+def release(known, item, by, force):
+    field, holder = claim_field(known), item["claimed_by"]
+    if holder and not force and holder != claimant(by):
+        raise WorkError("#" + str(item["number"]) + " is claimed by " + holder + "; --force releases it anyway")
+    if holder:
+        gql(SET_MUTATION, {"issue": item["node"], "fields": [{"fieldId": field, "delete": True}]})
+    return {"ok": True, "number": item["number"], "released": holder}
+
+
 def blocker_met(blocker, by_number):
     return not blocker["open"] or (by_number.get(blocker["number"]) or {}).get("stage") in ("Released", "Verified")
 
@@ -610,22 +655,25 @@ def blocker_met(blocker, by_number):
 def overview(items):
     by_number = {item["number"]: item for item in items if item["open"]}
     work = [item for item in items if item["open"] and not item["decision"] and (item["id"] or item["stage"])]
+    blocked = [item for item in work if item["stage"] in ("Candidate", "In progress", None)
+               and any(not blocker_met(blocker, by_number) for blocker in item["blocked_by"])]
     return {"replies_waiting": [item for item in items if item["open"] and item["awaits_reply"]],
             "needs_you": [item for item in items if item["open"] and item["decision"]],
-            "blocked": [item for item in work if item["stage"] in ("Candidate", "In progress", None)
-                        and any(not blocker_met(blocker, by_number) for blocker in item["blocked_by"])],
+            "blocked": blocked,
+            "ready": [item for item in work if item["stage"] == "Candidate" and item not in blocked and not item["claimed_by"] and not item["needs_decision"]],
             "stages": {stage: [item for item in work if item["stage"] == stage] for stage in STAGES},
             "no_stage": [item for item in work if item["stage"] not in STAGES]}
 
 
 def render(view):
     sections = [("A person commented last: read it and reply", view["replies_waiting"]), ("Needs human", view["needs_you"]),
-                ("Blocked", view["blocked"])] + [(stage, view["stages"][stage]) for stage in STAGES] + [("No stage", view["no_stage"])]
+                ("Blocked", view["blocked"]), ("Ready: unclaimed, unblocked candidates", view["ready"])] + [(stage, view["stages"][stage]) for stage in STAGES] + [("No stage", view["no_stage"])]
     lines = []
     for heading, rows in sections:
         lines.append(heading + ": " + str(len(rows)) + (" (first " + str(SHOWN) + " shown; --json lists all)" if len(rows) > SHOWN else ""))
         for row in rows[:SHOWN]:
-            lines.append("  #" + str(row["number"]) + " " + (row["id"] or "-") + ": " + row["title"][:90] + ("  -> " + row["next"] if row.get("next") else ""))
+            lines.append("  #" + str(row["number"]) + " " + (row["id"] or "-") + ": " + row["title"][:90] +
+                         ("  [claimed by " + row["claimed_by"] + "]" if row.get("claimed_by") else "") + ("  -> " + row["next"] if row.get("next") else ""))
     return "\n".join(lines)
 
 
@@ -652,6 +700,10 @@ def run(args):
     item = lookup(args.task)
     if not item["open"] and item["reason"] != "COMPLETED":
         raise WorkError("#" + str(item["number"]) + " is closed as " + str(item["reason"] or "not planned").lower().replace("_", " "))
+    if command == "claim":
+        return claim(known, item, claimant(args.by))
+    if command == "release":
+        return release(known, item, args.by, args.force)
     if command == "set":
         if args.stage is None and args.verify is None and args.next is None:
             raise WorkError("nothing to set: pass --stage, --next or --verify")
@@ -696,7 +748,14 @@ def add_commands(parser):
     verify = sub.add_parser("verify", parents=[common], help="record production evidence for the released merge, set Verified and close the issue")
     verify.add_argument("task", help="task id or #issue number")
     verify.add_argument("--evidence-file", required=True, help="what was exercised in production and what was observed; - reads standard input")
-    status = sub.add_parser("status", parents=[common], help="open work by stage, and issues where a person commented last")
+    claimed = sub.add_parser("claim", parents=[common], help="record who works on a task before the work starts; refused if someone else holds it")
+    claimed.add_argument("task", help="task id or #issue number")
+    claimed.add_argument("--by", help="who claims it (default: SHERIFF_AGENT, else your gh login)")
+    released = sub.add_parser("release", parents=[common], help="clear a task's claim")
+    released.add_argument("task", help="task id or #issue number")
+    released.add_argument("--by", help="who releases it (default: SHERIFF_AGENT, else your gh login)")
+    released.add_argument("--force", action="store_true", help="release someone else's claim")
+    status = sub.add_parser("status", parents=[common], help="open work by stage, ready tasks, and issues where a person commented last")
     status.add_argument("--json", action="store_true")
     reply = sub.add_parser("reply", parents=[common], help="answer a person's comment on an issue")
     reply.add_argument("task", help="task id or #issue number")
