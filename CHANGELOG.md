@@ -7,6 +7,13 @@ release is made.
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-11-25
+
+### Added
+
+- Every item in `gh sheriff task status --json` and `task show` carries its `labels`, so dispatchers can split ready
+  work by label without extra API calls.
+
 ## [1.3.0] - 2026-11-25
 
 ### Added
@@ -144,7 +151,8 @@ First versioned release. Sheriff is in beta: behaviour, settings and messages ca
   a person set is never changed.
 - Plans and reviews are written in plain language.
 
-[Unreleased]: https://github.com/nick-the-dev/gh-sheriff/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/nick-the-dev/gh-sheriff/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/nick-the-dev/gh-sheriff/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/nick-the-dev/gh-sheriff/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/nick-the-dev/gh-sheriff/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/nick-the-dev/gh-sheriff/compare/v1.0.2...v1.1.0

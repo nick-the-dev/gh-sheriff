@@ -477,7 +477,7 @@ git switch -c ai/LOGIN-FIX                    # then push and open the pull requ
   same order. An agent that needs a person's answer runs `task ask <ID> --question "..."`, reads the reply on the issue,
   and runs `task ask <ID> --clear` once it is answered.
 - Each item in `status --json` (and `task show`) has `id`, `number`, `title`, `url`, `open`, `reason`, `created`,
-  `updated`, `closed`, `type`, `priority`, `decision`, `needs_decision`, `asked`, `stage`, `verify`, `next`,
+  `updated`, `closed`, `type`, `labels`, `priority`, `decision`, `needs_decision`, `asked`, `stage`, `verify`, `next`,
   `claimed_by`, `assignees`, `blocked_by` (`number`, `open`, `title`) and `awaits_reply`. The top-level keys are
   `replies_waiting`, `needs_you`, `blocked`, `ready`, `stages` (one list per Stage) and `no_stage`.
 - `claim` writes the claimant into `Claimed by`. It is refused when someone else holds the task, and changes nothing
@@ -487,6 +487,8 @@ git switch -c ai/LOGIN-FIX                    # then push and open the pull requ
 - Every item in `status --json` carries `claimed_by`, so a dispatcher can list its own work and leave other owners'
   tasks and pull requests alone: `jq --arg me "$SHERIFF_AGENT" '[.stages[][] | select(.claimed_by == $me)]'`.
   `status` without `--json` shows `[claimed by ...]`.
+- Every item also carries its `labels`, so several dispatchers can split the work by label, each taking only its
+  own: `jq '[.ready[] | select(.labels | index("agent:mine"))]'`.
 - `release` clears your claim and `--force` clears anyone's. Release a task you give up; if its pull request was
   closed, the next sync returns it to Candidate and releases the claim itself. `task drop` closes a task you won't do.
 - A claim stays when the pull request merges or the issue closes, as a record of who did the task. Claims don't

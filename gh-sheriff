@@ -471,7 +471,7 @@ def ensure_secrets(info, names, rotate=False):
 
 
 RELEASE = "v1"
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 SHERIFF_REPO = "nick-the-dev/gh-sheriff"
 FOLLOW_REF = re.compile(r"(nick-the-dev/gh-sheriff/actions/[a-z-]+)@v1 # zizmor: ignore\[unpinned-uses\][^\n]*")
 PINNED_REF = re.compile(r"nick-the-dev/gh-sheriff/actions/[a-z-]+@(v\d+\.\d+\.\d+)")
