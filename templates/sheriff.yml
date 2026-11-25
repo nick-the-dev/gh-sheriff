@@ -7,13 +7,14 @@ name: Sheriff
 # the work state when it ends: `gh workflow run sheriff.yml --ref <default branch> -f after_run=<its run id>`. With
 # SHERIFF_PLAN=on, a task issue opened by a trusted author, a `/sheriff plan` or `/sheriff replan <reason>` comment, or a
 # person's reply on an issue labelled sheriff:needs-decision (the answer to the plan's open question) starts the plan
+# jobs. An issue opened or retitled runs the work-state sync, so a task without a Stage becomes a Candidate at once. Plan
 # jobs: plan-reserve and plan-post write as the gate App in `sheriff`, and plan runs the model read-only in
 # `sheriff-review`.
 on:
   issue_comment: # zizmor: ignore[dangerous-triggers] runs the default branch's copy; no pull request code runs
     types: [created, edited, deleted]
   issues:
-    types: [opened]
+    types: [opened, edited]
   workflow_run: # zizmor: ignore[dangerous-triggers] runs the default branch's copy; pull request files are read as data
     # gh sheriff install adds the pull request workflows that hold a required check next to the relay. Their
     # completion re-runs the gate job only; the other jobs run only from the relay (they check the workflow's name).
@@ -200,7 +201,8 @@ jobs:
   state:
     name: Sync work stages
     if: >-
-      github.event_name != 'issue_comment' && github.event_name != 'issues' && !inputs.plan_issue &&
+      github.event_name != 'issue_comment' && !inputs.plan_issue &&
+      (github.event_name != 'issues' || github.event.action == 'opened' || github.event.changes.title) &&
       (github.event_name != 'workflow_run' || github.event.workflow_run.name == 'Sheriff Relay') &&
       vars.SHERIFF_WORK_STATE == 'on'
     runs-on: ${{ vars.SHERIFF_RUNS_ON || 'ubuntu-latest' }}
@@ -219,6 +221,9 @@ jobs:
         env:
           SHERIFF_VERSION_URL: ${{ vars.SHERIFF_VERSION_URL }}
           SHERIFF_DEPLOY_WORKFLOW: ${{ vars.SHERIFF_DEPLOY_WORKFLOW }}
+          SHERIFF_HEALTH_URL: ${{ vars.SHERIFF_HEALTH_URL }}
+          SHERIFF_PROJECT: ${{ vars.SHERIFF_PROJECT }}
+          SHERIFF_WORK_STATE_SINCE: ${{ vars.SHERIFF_WORK_STATE_SINCE }}
         with:
           after-run: ${{ inputs.after_run }}
 

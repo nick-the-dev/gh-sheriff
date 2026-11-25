@@ -12,15 +12,19 @@ SPEC = importlib.util.spec_from_file_location("work_module", ROOT / "scripts" / 
 work = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(work)
 work.REPO = "o/r"
+NO_VARIABLES = {name: "" for name in ("SHERIFF_PROJECT", "SHERIFF_WORK_STATE_SINCE", "SHERIFF_DECIDERS", "SHERIFF_VERSION_URL", "SHERIFF_DEPLOY_WORKFLOW",
+                                       "SHERIFF_HEALTH_URL")}
+work.VARIABLES.update(NO_VARIABLES)
 
 C1, C2, PROD = "1" * 40, "2" * 40, "f" * 40
 
 
 def item(task="A", number=1, stage="Candidate", verify="Live check", decision=False, is_open=True, reason=None, blocked_by=(), awaits=None,
-         claimed_by=None, needs_decision=False):
+         claimed_by=None, needs_decision=False, asked=False, priority=None, created="2026-11-01T00:00:00Z", closed=None):
     return {"id": task, "node": "N" + str(number), "number": number, "title": "t", "open": is_open, "reason": reason, "url": "u",
-            "created": "2026-11-01T00:00:00Z", "type": "Task", "decision": decision, "needs_decision": needs_decision, "stage": stage,
-            "verify": verify, "next": None, "claimed_by": claimed_by, "blocked_by": list(blocked_by), "awaits_reply": awaits}
+            "created": created, "updated": created, "closed": closed if closed or is_open else "2026-11-03T00:00:00Z", "type": "Task",
+            "priority": priority, "decision": decision, "needs_decision": needs_decision, "asked": asked, "stage": stage, "verify": verify,
+            "next": None, "claimed_by": claimed_by, "assignees": [], "blocked_by": list(blocked_by), "awaits_reply": awaits}
 
 
 def pr(state="OPEN", commit=None, merged_at=None, number=10):
@@ -32,6 +36,7 @@ def mark(sha):
 
 
 MERGED = {"A": [pr("MERGED", C1, "2026-11-02")]}
+SINCE = "2026-11-02T00:00:00Z"
 
 
 def derive(entry, prs, live=()):
@@ -125,14 +130,16 @@ class PullRequestsTest(unittest.TestCase):
                 "MERGED": [{"number": 3, "title": "c (CC)", "headRefName": "x", "baseRefName": "release", "mergedAt": "t", "mergeCommit": {"oid": C1}},
                            {"number": 4, "title": "d (DD)", "headRefName": "x", "baseRefName": "main", "mergedAt": "t", "mergeCommit": {"oid": C2}},
                            {"number": 5, "title": "renamed (EE)", "headRefName": "x", "baseRefName": "main", "mergedAt": "t",
-                            "mergeCommit": {"oid": C2}, "isCrossRepository": True}]}
+                            "mergeCommit": {"oid": C2}, "isCrossRepository": True}],
+                "CLOSED": [{"number": 6, "title": "f (FF)", "headRefName": "x", "baseRefName": "main", "closedAt": "t2"}]}
 
         def fake(query, variables=None):
             nodes = rows[variables["states"][0]]
             return {"repository": {"defaultBranchRef": {"name": "main"}, "pullRequests": {"nodes": nodes, "pageInfo": {"hasNextPage": False}}}}
         with mock.patch.object(work, "gql", fake):
             groups, branch = work.pull_requests()
-        self.assertEqual((sorted(groups), branch, groups["DD"][0]["commit"]), (["BB", "DD"], "main", C2))
+        self.assertEqual((sorted(groups), branch, groups["DD"][0]["commit"]), (["BB", "DD", "FF"], "main", C2))
+        self.assertEqual((groups["FF"][0]["state"], groups["FF"][0]["closed_at"]), ("CLOSED", "t2"))
 
 
 class ReleaseCheckTest(unittest.TestCase):
@@ -212,7 +219,7 @@ class ServedShaTest(unittest.TestCase):
 
 
 class SyncTest(unittest.TestCase):
-    def run_sync(self, items, prs, apply=True, only=None, moved=(), known=KNOWN, live=(C1,), comments=None):
+    def run_sync(self, items, prs, apply=True, only=None, moved=(), known=KNOWN, live=(C1,), comments=None, since=SINCE):
         calls, bodies = [], comments or {}
 
         def fake_gql(query, variables=None):
@@ -227,6 +234,8 @@ class SyncTest(unittest.TestCase):
             "comment": lambda entry, body, mark=work.AGENT_MARK: calls.append(("comment", entry["id"], body + "\n\n" + mark)),
             "close": lambda entry, reason="COMPLETED": calls.append(("close", entry["id"])),
             "reopen": lambda entry: calls.append(("reopen", entry["id"])), "gql": fake_gql,
+            "variable": lambda name: since if name == "SHERIFF_WORK_STATE_SINCE" else "",
+            "release_claim": lambda known, entry: calls.append(("release", entry["id"])),
         }
         with mock.patch.multiple(work, **patches):
             return work.sync(apply, only), calls
@@ -284,7 +293,8 @@ class SyncTest(unittest.TestCase):
         self.assertIn("`gh sheriff task verify A --evidence-file <file>`", calls[0][2])
         self.assertTrue(calls[0][2].endswith(work.AGENT_MARK))
         self.assertEqual(calls[1][2], {"stage": "Released"})
-        self.assertEqual(work.sync_text(result), "#1 A: Verified -> Released (Verified without recorded evidence)")
+        self.assertEqual(work.sync_text(result), "#1 A: Verified -> Released (Verified without recorded evidence)\n"
+                                                 "1 Verified task(s) without recorded evidence were set back")
 
     def test_evidence_for_an_older_merge_does_not_count(self):
         prs = {"A": [pr("MERGED", C1, "2026-11-02"), pr("MERGED", C2, "2026-11-06", 11)]}
@@ -312,12 +322,18 @@ class SyncTest(unittest.TestCase):
     def test_a_revert_without_apply_is_only_reported(self):
         result, calls = self.run_sync([item(stage="Verified", is_open=False, reason="COMPLETED")], MERGED, apply=False)
         self.assertEqual(calls, [])
-        self.assertEqual(work.sync_text(result), "would move #1 A: Verified -> Released (Verified without recorded evidence)")
+        self.assertEqual(work.sync_text(result), "would move #1 A: Verified -> Released (Verified without recorded evidence)\n"
+                                                 "1 Verified task(s) without recorded evidence would be set back")
 
     def test_a_revert_goes_no_higher_than_the_facts(self):
         for prs, stage, verify in ((MERGED, "Released", "Release only"), ({"A": [pr()]}, "In progress", "Live check"), ({}, "Candidate", "Live check")):
             with self.subTest(stage=stage):
                 self.assertEqual(self.run_sync([item(stage="Verified", verify=verify)], prs)[0]["changes"][0]["to"], stage)
+
+    def test_a_marker_without_a_sha_counts_only_while_there_is_no_merge(self):
+        notes = {"A": ["checked\n\n" + mark(work.NO_MERGE)]}
+        self.assertEqual(self.run_sync([item(stage="Verified")], {}, comments=notes)[0]["changes"], [])
+        self.assertEqual(self.run_sync([item(stage="Verified")], MERGED, comments=notes)[0]["changes"][0]["to"], "Released")
 
     def test_decisions_stay_and_a_marker_counts_when_no_merge_is_in_view(self):
         items = [item("A", 1, "Verified", decision=True), item("B", 2, "Verified")]
@@ -332,7 +348,7 @@ class SyncTest(unittest.TestCase):
     def test_a_repository_without_the_fields_is_skipped_quietly(self):
         result, calls = self.run_sync([item()], {"A": [pr()]}, known=dict(KNOWN, missing=["Stage"]))
         self.assertEqual((calls, result["changes"]), ([], []))
-        self.assertIn("gh sheriff install", work.sync_text(result))
+        self.assertIn("gh sheriff update", work.sync_text(result))
 
 
 class EvidenceTest(unittest.TestCase):
@@ -379,13 +395,13 @@ class ItemTest(unittest.TestCase):
                 "issueType": {"name": kind}, "labels": {"nodes": [{"name": name} for name in labels]},
                 "issueFieldValues": {"nodes": [{"name": "Released", "field": {"name": "Stage"}}, {"value": "decide", "field": {"name": "Next action"}},
                                                {"name": "High", "field": {"name": "Priority"}}, {"value": "agent-7", "field": {"name": "Claimed by"}}, {}]},
-                "blockedBy": {"nodes": [{"number": 7, "state": "CLOSED"}]}, "comments": {"nodes": []}}
+                "blockedBy": {"nodes": [{"number": 7, "state": "CLOSED", "title": "Old work"}]}, "comments": {"nodes": []}}
 
     def test_issue_becomes_an_item(self):
         made = work.to_item(self.node())
         self.assertEqual((made["id"], made["title"], made["stage"], made["next"], made["verify"], made["decision"]),
                          ("OBS-05", "Alerts", "Released", "decide", None, False))
-        self.assertEqual(made["blocked_by"], [{"number": 7, "open": False}])
+        self.assertEqual(made["blocked_by"], [{"number": 7, "open": False, "title": "Old work"}])
         self.assertEqual((made["claimed_by"], made["needs_decision"]), ("agent-7", False))
         self.assertTrue(work.to_item(self.node(labels=("sheriff:needs-decision",)))["needs_decision"])
 
@@ -447,7 +463,7 @@ class OverviewTest(unittest.TestCase):
         view = work.overview(items)
         self.assertEqual([row["id"] for row in view["ready"]], ["A"])
         text = work.render(view)
-        self.assertIn("Ready: unclaimed, unblocked candidates: 1", text)
+        self.assertIn("Ready: unclaimed, unblocked candidates without an open pull request: 1", text)
         self.assertIn("#2 B: t  [claimed by agent-1]", text)
 
     def test_a_released_blocker_is_met(self):
@@ -470,13 +486,13 @@ class MakeIdTest(unittest.TestCase):
 
 
 class CommandTest(unittest.TestCase):
-    def call(self, argv, entry=None, prs=None, known=KNOWN, open_items=(), closed=(), live=(C1,)):
+    def call(self, argv, entry=None, prs=None, known=KNOWN, open_items=(), closed=(), live=(C1,), searched=(), every=None):
         calls = []
         patches = {
             "use_repo": lambda explicit=None: "o/r", "schema": lambda: known,
             "lookup": lambda task: entry, "issues": lambda state="OPEN", pages=0: list(open_items),
             "closed_matches": lambda task: [c for c in closed if c["id"] == task],
-            "pull_requests": lambda pages=0, merged=True: (prs or {}, "main"),
+            "pull_requests": lambda pages=0, merged=True: ((every if pages == work.MAX_PAGES and every is not None else prs) or {}, "main"),
             "release_check": lambda branch: (lambda commit: "released" if commit in live else ""),
             "set_fields": lambda known, e, **values: calls.append(("set", values)),
             "comment": lambda e, body, mark=work.AGENT_MARK: calls.append(("comment", body + "\n\n" + mark)),
@@ -484,7 +500,7 @@ class CommandTest(unittest.TestCase):
             "label_id": lambda name: calls.append(("label", name)) or "L1",
             "gql": lambda query, variables=None: calls.append(("gql", variables)) or {"createIssue": {"issue": {"id": "I9", "number": 9, "url": "u9"}}},
             "read_text": lambda path: "x" * 50 if path == "long" else "short",
-            "mirror_status": lambda node, stage: None,
+            "mirror_status": lambda node, stage: None, "task_merges": lambda task, branch: list(searched),
         }
         out = io.StringIO()
         with mock.patch.multiple(work, **patches), mock.patch("sys.stdout", out):
@@ -521,11 +537,32 @@ class CommandTest(unittest.TestCase):
         self.assertEqual(calls[1:], [("set", {"stage": "Verified", "next_action": ""}), ("close", "COMPLETED")])
 
     def test_verify_refuses_without_a_released_merge(self):
-        for prs, live in ((None, (C1,)), ({"A": [pr()]}, (C1,)), (MERGED, ()), ({"A": [pr("MERGED", None, "2026-11-02")]}, (None,))):
+        for prs, live in (({"A": [pr()]}, (C1,)), (MERGED, ()), ({"A": [pr("MERGED", None, "2026-11-02")]}, (None,))):
             with self.subTest(prs=prs, live=live):
                 code, calls, out = self.call(["verify", "A", "--evidence-file", "long"], item(stage="Released"), prs, live=live)
                 self.assertEqual((code, calls), (1, []))
                 self.assertIn("released", json.loads(out)["error"])
+
+    def test_verify_of_work_without_a_pull_request_records_a_marker_without_a_sha(self):
+        code, calls, _ = self.call(["verify", "A", "--evidence-file", "long"], item(stage="Released"))
+        self.assertEqual(code, 0)
+        self.assertTrue(calls[0][1].endswith("\n\n" + mark(work.NO_MERGE)))
+        self.assertEqual(work.marked_sha(calls[0][1]), work.NO_MERGE)
+
+    def test_verify_finds_a_merge_older_than_the_recent_pull_requests(self):
+        code, calls, _ = self.call(["verify", "A", "--evidence-file", "long"], item(stage="Released"), searched=[pr("MERGED", C2, "2026-10-01", 3)], live=(C2,))
+        self.assertEqual(code, 0)
+        self.assertTrue(calls[0][1].endswith("\n\n" + mark(C2)))
+
+    def test_verify_never_records_sha_none_for_a_task_with_pull_requests_outside_the_recent_window(self):
+        for found, code in (([pr("CLOSED", number=3)], 1), ([pr("MERGED", C2, "2026-10-01", 3)], 0)):
+            with self.subTest(found=found):
+                result, calls, out = self.call(["verify", "A", "--evidence-file", "long"], item(stage="Released"), live=(C2,), every={"A": found})
+                self.assertEqual(result, code)
+                if code:
+                    self.assertEqual(calls, [])
+                else:
+                    self.assertTrue(calls[0][1].endswith(mark(C2)))
 
     def test_verify_does_not_reclose_an_issue_closed_at_merge(self):
         code, calls, _ = self.call(["verify", "A", "--evidence-file", "long"], item(stage="Released", is_open=False, reason="COMPLETED"), MERGED)
@@ -567,6 +604,23 @@ class CommandTest(unittest.TestCase):
     def test_an_id_already_used_open_or_closed_is_refused(self):
         self.assertEqual(self.call(["new", "x", "--id", "OLD"], closed=[item("OLD", is_open=False)])[:2], (1, []))
         self.assertEqual(self.call(["new", "x", "--id", "lower"])[:2], (1, []))
+
+    def test_new_links_blockers_both_ways(self):
+        code, calls, out = self.call(["new", "Linked", "--id", "LINKED", "--blocked-by", "A", "--blocks", "#1"], item())
+        links = [call[1] for call in calls if call[0] == "gql" and "blocking" in (call[1] or {})]
+        self.assertEqual((code, links), (0, [{"issue": "I9", "blocking": "N1"}, {"issue": "N1", "blocking": "I9"}]))
+        self.assertEqual((json.loads(out)["blocked_by"], json.loads(out)["blocks"]), ([1], [1]))
+
+    def test_show_prints_one_item(self):
+        code, calls, out = self.call(["show", "A"], item(priority="P1"))
+        self.assertEqual((code, calls, json.loads(out)["priority"]), (0, [], "P1"))
+
+    def test_drop_comments_releases_the_claim_and_closes_as_not_planned(self):
+        with mock.patch.object(work, "release_claim", lambda known, entry: None) as _:
+            code, calls, out = self.call(["drop", "A", "--reason", "superseded by B"], item(claimed_by="agent-1"))
+        self.assertEqual((code, calls[0], calls[1], json.loads(out)["released"]), (0, ("comment", "Dropped: superseded by B\n\n" + work.AGENT_MARK),
+                                                                                  ("close", "NOT_PLANNED"), "agent-1"))
+        self.assertEqual(self.call(["drop", "A", "--reason", "x"], item(is_open=False, reason="COMPLETED"))[:2], (1, []))
 
     def test_commands_need_the_fields(self):
         code, calls, out = self.call(["set", "A", "--next", "x"], item(), known=dict(KNOWN, missing=["Stage"]))
@@ -620,7 +674,7 @@ class ClaimTest(unittest.TestCase):
         self.assertEqual(self.call(["claim", "A", "--by", "me"], item(is_open=False, reason="COMPLETED"))[:2], (1, []))
         code, writes, out = self.call(["claim", "A", "--by", "me"], known=dict(KNOWN, claim=None))
         self.assertEqual((code, writes), (1, []))
-        self.assertIn("no issue field Claimed by: run gh sheriff install", out["error"])
+        self.assertIn("no issue field Claimed by: run gh sheriff update", out["error"])
 
     def test_the_holder_releases_and_others_need_force(self):
         code, writes, out = self.call(["release", "A", "--by", "me"], item(claimed_by="me"))
@@ -675,12 +729,148 @@ class GraphqlTest(unittest.TestCase):
             self.assertEqual(work.gql("query{x}"), {"x": 1})
 
 
+class AskTest(unittest.TestCase):
+    def call(self, argv, entry=None, deciders=""):
+        calls, out = [], io.StringIO()
+        patches = {"use_repo": lambda explicit=None: "o/r", "schema": lambda: KNOWN, "lookup": lambda task: entry or item(),
+                   "label_id": lambda name, description="": calls.append(("label", name)) or "L9",
+                   "gql": lambda query, variables=None: calls.append(("gql", query.split("{", 1)[1].split("(")[0], variables)) or {},
+                   "comment": lambda e, body, mark=work.AGENT_MARK: calls.append(("comment", body)),
+                   "api": lambda args, stdin=None: calls.append(("api", args)) or {},
+                   "variable": lambda name: deciders if name == "SHERIFF_DECIDERS" else ""}
+        with mock.patch.multiple(work, **patches), mock.patch("sys.stdout", out):
+            code = work.main(argv)
+        return code, calls, json.loads(out.getvalue())
+
+    def test_ask_labels_mentions_and_assigns(self):
+        code, calls, out = self.call(["ask", "A", "--question", "Which region?", "--to", "@alice", "--to", "bob"])
+        self.assertEqual((code, out["to"]), (0, ["alice", "bob"]))
+        self.assertEqual(calls[0], ("label", work.ASK_LABEL))
+        self.assertEqual(calls[1][1:], ("addLabelsToLabelable", {"id": "N1", "labels": ["L9"]}))
+        self.assertTrue(calls[2][1].startswith("@alice @bob Which region?"))
+        self.assertEqual(calls[3], ("api", ["repos/o/r/issues/1/assignees", "-X", "POST", "-f", "assignees[]=alice", "-f", "assignees[]=bob"]))
+
+    def test_ask_defaults_to_the_deciders_and_needs_someone_and_a_question(self):
+        self.assertEqual(self.call(["ask", "A", "--question", "q"], deciders="carol, dan")[2]["to"], ["carol", "dan"])
+        self.assertEqual(self.call(["ask", "A", "--question", "q"])[:2], (1, []))
+        self.assertEqual(self.call(["ask", "A", "--to", "x"])[:2], (1, []))
+        self.assertEqual(self.call(["ask", "A", "--question", "q", "--to", "x"], item(is_open=False, reason="COMPLETED"))[:2], (1, []))
+
+    def test_clear_removes_the_label_only_when_it_is_there(self):
+        code, calls, out = self.call(["ask", "A", "--clear"], item(asked=True))
+        self.assertEqual((code, calls[1][1], out["asked"]), (0, "removeLabelsFromLabelable", False))
+        self.assertEqual(self.call(["ask", "A", "--clear"], item())[:2], (0, []))
+
+
+class AdoptionTest(unittest.TestCase):
+    run_sync = SyncTest.run_sync
+
+    def test_closed_issues_are_audited_only_when_closed_after_the_cutoff(self):
+        old = item("A", 1, "Verified", is_open=False, reason="COMPLETED", closed="2026-10-01T00:00:00Z")
+        new = item("B", 2, "Verified", is_open=False, reason="COMPLETED", closed="2026-11-05T00:00:00Z")
+        result, calls = self.run_sync([old, new], {"A": MERGED["A"], "B": MERGED["A"]})
+        self.assertEqual(([change["id"] for change in result["changes"]], ("reopen", "A") in calls), (["B"], False))
+        self.assertEqual(result["audits_closed_since"], SINCE)
+
+    def test_without_a_cutoff_closed_issues_are_never_reopened_and_open_ones_are_still_audited(self):
+        closed, opened = item("A", 1, "Verified", is_open=False, reason="COMPLETED"), item("B", 2, "Verified")
+        result, calls = self.run_sync([closed, opened], {"A": MERGED["A"], "B": MERGED["A"]}, since="")
+        self.assertEqual(([change["id"] for change in result["changes"]], [call for call in calls if call[0] == "reopen"]), (["B"], []))
+
+
+class TriageTest(unittest.TestCase):
+    run_sync = SyncTest.run_sync
+
+    def test_an_open_task_without_a_stage_becomes_a_live_check_candidate(self):
+        result, calls = self.run_sync([item(stage=None, verify=None), item("B", 2, stage=None, decision=True),
+                                       item("C", 3, stage=None, is_open=False, reason="COMPLETED")], {})
+        self.assertEqual(calls, [("set", "A", {"stage": "Candidate", "verify": "Live check"})])
+        self.assertEqual(work.sync_text(result), "#1 A: no stage -> Candidate (it had no stage)")
+
+    def test_work_whose_pull_requests_were_all_closed_returns_to_candidate_and_loses_its_claim(self):
+        closed = pr("CLOSED")
+        closed["closed_at"] = "2026-11-04T00:00:00Z"
+        result, calls = self.run_sync([item(stage="In progress", claimed_by="agent-1")], {"A": [closed]})
+        self.assertEqual(calls, [("set", "A", {"stage": "Candidate"}), ("release", "A")])
+        self.assertEqual(result["changes"][0]["why"], "its pull requests were closed without merging")
+
+    def test_only_abandoned_work_loses_its_claim(self):
+        result, calls = self.run_sync([item(stage=None, claimed_by="agent-1"), item("B", 2, "Verified", claimed_by="agent-2")], {})
+        self.assertEqual([call[0] for call in calls], ["set", "comment", "set"])
+
+    def test_pull_requests_closed_before_the_issue_or_beside_an_open_one_change_nothing(self):
+        old, live = pr("CLOSED"), pr("CLOSED", number=11)
+        old["closed_at"], live["closed_at"] = "2026-10-01T00:00:00Z", "2026-11-04T00:00:00Z"
+        for prs in ([old], [live, pr()]):
+            with self.subTest(prs=prs):
+                self.assertEqual(self.run_sync([item(stage="In progress")], {"A": prs})[1], [])
+
+
+class PriorityTest(unittest.TestCase):
+    def test_ready_and_needs_you_sort_by_priority_then_age_and_ready_skips_busy_or_asked_work(self):
+        items = [item("A", 1, priority="P3", created="2026-11-01"), item("B", 2, created="2026-11-02"), item("C", 3, priority="P0", created="2026-11-03"),
+                 item("D", 4, created="2026-11-01"), item("E", 5, asked=True, priority="P1"), item("F", 6), item("Q", 7, None, decision=True, priority="P0"),
+                 item("G", 8, needs_decision=True)]
+        view = work.overview(items, busy={"F"})
+        self.assertEqual([row["id"] for row in view["ready"]], ["C", "D", "B", "A"])
+        self.assertEqual([row["id"] for row in view["needs_you"]], ["Q", "E", "G"])
+
+    def test_labels_give_the_priority_and_the_question(self):
+        node = ItemTest().node(labels=("priority:P1", "sheriff:needs-person"))
+        node.update(updatedAt="u2", closedAt=None, assignees={"nodes": [{"login": "alice"}]})
+        made = work.to_item(node)
+        self.assertEqual((made["priority"], made["asked"], made["updated"], made["assignees"]), ("P1", True, "u2", ["alice"]))
+        self.assertIsNone(work.to_item(ItemTest().node())["priority"])
+
+
+class VariableTest(unittest.TestCase):
+    def setUp(self):
+        work.VARIABLES.clear()
+        self.addCleanup(work.VARIABLES.update, NO_VARIABLES)
+
+    def test_the_environment_wins_then_the_repository_variable_is_read_once(self):
+        found = mock.Mock(return_value=mock.Mock(returncode=0, stdout="Team board\n"))
+        with mock.patch.dict(work.os.environ, {}, clear=True), mock.patch.object(work, "gh", found):
+            self.assertEqual((work.board_title("o/r"), work.board_title("o/r")), ("Team board", "Team board"))
+        self.assertEqual(found.call_count, 1)
+        work.VARIABLES.clear()
+        with mock.patch.dict(work.os.environ, {"SHERIFF_PROJECT": "Env board"}), mock.patch.object(work, "gh", side_effect=AssertionError):
+            self.assertEqual(work.board_title("o/r"), "Env board")
+
+    def test_an_unreadable_variable_is_empty(self):
+        with mock.patch.dict(work.os.environ, {}, clear=True), mock.patch.object(work, "gh", return_value=mock.Mock(returncode=1, stdout="")):
+            self.assertEqual(work.board_title("o/r"), "r work")
+
+
+class RepositoryVariableReleaseTest(unittest.TestCase):
+    def test_the_release_settings_come_from_repository_variables_outside_ci(self):
+        work.VARIABLES.update({"SHERIFF_VERSION_URL": "u", "SHERIFF_HEALTH_URL": "h"})
+        self.addCleanup(work.VARIABLES.update, NO_VARIABLES)
+        with mock.patch.dict(work.os.environ, {}, clear=True), mock.patch.object(work, "served_sha", lambda url: PROD), \
+                mock.patch.object(work, "answers", lambda url: url == "h"), \
+                mock.patch.object(work, "gh", return_value=mock.Mock(returncode=0, stdout="ahead\n")):
+            self.assertIn("h answers 200", work.release_check("main")(C1))
+
+
+class HealthTest(unittest.TestCase):
+    def check(self, healthy):
+        with mock.patch.dict(work.os.environ, {"SHERIFF_HEALTH_URL": "h"}, clear=True), mock.patch.object(work, "answers", lambda url: healthy):
+            return work.release_check("main")(C1)
+
+    def test_an_unhealthy_production_releases_nothing(self):
+        self.assertEqual(self.check(False), "")
+
+    def test_a_healthy_production_says_so_in_the_evidence(self):
+        self.assertIn("h answers 200", self.check(True))
+
+
 class WiringTest(unittest.TestCase):
     def test_every_command_parses_with_a_repository(self):
         parser = work.add_commands(argparse.ArgumentParser())
         for argv in (["new", "T", "--repo", "o/r"], ["set", "#3", "--stage", "Parked"], ["verify", "A", "--evidence-file", "-"],
                      ["status", "--json"], ["reply", "A", "--body-file", "-"], ["sync", "--apply", "--pages", "2"],
-                     ["claim", "A", "--by", "x"], ["release", "#3", "--force"]):
+                     ["claim", "A", "--by", "x"], ["release", "#3", "--force"], ["ask", "A", "--question", "q", "--to", "x"], ["ask", "A", "--clear"],
+                     ["show", "A"], ["drop", "A", "--reason", "r"], ["new", "T", "--blocked-by", "A", "--blocks", "B"]):
             with self.subTest(argv=argv):
                 self.assertEqual(parser.parse_args(argv).task_command, argv[0])
 

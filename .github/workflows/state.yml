@@ -33,5 +33,8 @@ jobs:
         env:
           SHERIFF_VERSION_URL: ${{ vars.SHERIFF_VERSION_URL }}
           SHERIFF_DEPLOY_WORKFLOW: ${{ vars.SHERIFF_DEPLOY_WORKFLOW }}
+          SHERIFF_HEALTH_URL: ${{ vars.SHERIFF_HEALTH_URL }}
+          SHERIFF_PROJECT: ${{ vars.SHERIFF_PROJECT }}
+          SHERIFF_WORK_STATE_SINCE: ${{ vars.SHERIFF_WORK_STATE_SINCE }}
         with:
           after-run: ${{ inputs.after_run }}

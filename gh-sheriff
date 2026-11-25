@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""gh sheriff: install and check Sheriff on a GitHub repository. Usage: gh sheriff install|doctor [--repo owner/name]."""
+"""gh sheriff: install, update and check Sheriff on a GitHub repository. Usage: gh sheriff install|update|doctor [--repo owner/name]."""
 import argparse
 import base64
 import getpass
@@ -71,6 +71,54 @@ def open_url(url):
     say("    " + url)
 
 
+DRY_RUN = False
+WRITE_COMMANDS = {("secret", "set"), ("secret", "delete"), ("variable", "set"), ("variable", "delete"), ("pr", "create"), ("pr", "close"),
+                  ("pr", "merge"), ("workflow", "run"), ("label", "create")}
+
+
+def writes(args, stdin=None):
+    args = [str(arg) for arg in args]
+    if tuple(args[:2]) in WRITE_COMMANDS:
+        return True
+    if args[:1] != ["api"]:
+        return False
+    if args[1:2] == ["graphql"]:
+        try:
+            query = str((json.loads(stdin) or {}).get("query") or "") if stdin else ""
+        except (ValueError, AttributeError):
+            query = ""
+        query = query or next((arg[len("query="):] for arg in args if arg.startswith("query=")), "")
+        return query.lstrip().startswith("mutation")
+    method = next((args[index + 1] for index, arg in enumerate(args[:-1]) if arg in ("-X", "--method")), None)
+    return method.upper() != "GET" if method else any(arg in ("-f", "-F", "--field", "--raw-field", "--input") for arg in args)
+
+
+def guarded(run):
+    def call(args, stdin=None):
+        if DRY_RUN and writes(args, stdin):
+            raise SheriffError("dry run: refused to write (gh " + " ".join(str(arg) for arg in list(args)[:4]) + ")")
+        return run(args, stdin)
+    return call
+
+
+WORK.gh = guarded(WORK.gh)
+
+
+def change(description, args, stdin=None):
+    if DRY_RUN:
+        say("would " + description)
+        return None
+    return gh_json(args, stdin)
+
+
+def work_change(description, query, variables):
+    if DRY_RUN:
+        say("would " + description)
+        return None
+    return WORK.gql(query, variables)
+
+
+@guarded
 def gh(args, stdin=None):
     result = subprocess.run(["gh"] + list(args), input=stdin, capture_output=True, text=True, check=False)
     if result.returncode:
@@ -140,22 +188,33 @@ def env_secret_names(repo, environment=ENVIRONMENT):
 
 
 def set_env_secret(repo, name, value, environment=ENVIRONMENT):
+    if DRY_RUN:
+        say("would store the secret " + name + " in the '" + environment + "' environment")
+        return
     gh(["secret", "set", name, "--env", environment, "--repo", repo], stdin=value)
 
 
 def ensure_environment(info, environment=ENVIRONMENT):
-    repo = info["repo"]
-    gh_json(["api", "-X", "PUT", "repos/" + repo + "/environments/" + environment, "--input", "-"],
-            json.dumps({"deployment_branch_policy": {"protected_branches": False, "custom_branch_policies": True}}))
-    policies = gh_json(["api", "repos/" + repo + "/environments/" + environment + "/deployment-branch-policies"]) or {}
+    repo, path, wanted = info["repo"], "repos/" + info["repo"] + "/environments/" + environment, {"protected_branches": False, "custom_branch_policies": True}
+    current = gh_json(["api", path]) if gh_status(["api", path]) else None
+    configured = bool(current) and current.get("deployment_branch_policy") == wanted
+    if not configured:
+        change(("set" if current else "create") + " the '" + environment + "' environment for custom branch policies",
+               ["api", "-X", "PUT", path, "--input", "-"], json.dumps({"deployment_branch_policy": wanted}))
+    try:
+        policies = (gh_json(["api", path + "/deployment-branch-policies"]) if current or not DRY_RUN else None) or {}
+    except SheriffError:
+        policies = {}
     names = {item.get("name") for item in policies.get("branch_policies", [])}
     for extra in names - {info["branch"]}:
         policy = next(item for item in policies["branch_policies"] if item.get("name") == extra)
-        gh(["api", "-X", "DELETE", "repos/" + repo + "/environments/" + environment + "/deployment-branch-policies/" + str(policy["id"])])
+        change("remove the branch policy '" + str(extra) + "' from the '" + environment + "' environment",
+               ["api", "-X", "DELETE", path + "/deployment-branch-policies/" + str(policy["id"])])
     if info["branch"] not in names:
-        gh(["api", "-X", "POST", "repos/" + repo + "/environments/" + environment + "/deployment-branch-policies",
-            "-f", "name=" + info["branch"], "-f", "type=branch"])
-    say("ok  environment '" + environment + "' is limited to " + info["branch"])
+        change("limit the '" + environment + "' environment to " + info["branch"],
+               ["api", "-X", "POST", path + "/deployment-branch-policies", "-f", "name=" + info["branch"], "-f", "type=branch"])
+    if not DRY_RUN or (configured and names == {info["branch"]}):
+        say("ok  environment '" + environment + "' is limited to " + info["branch"])
 
 
 PROJECTS_PERMISSION = "organization_projects"
@@ -256,6 +315,9 @@ def ensure_gate_app(info, force_new_key=False, interactive=True):
         app_id = known_app_id(slug)
         say("ok  gate App secrets are in the '" + ENVIRONMENT + "' environment" + (" (App " + str(app_id) + ")" if app_id else ""))
         return app_id, None
+    if DRY_RUN:
+        say("would connect or create the gate App " + slug + " and store SHERIFF_APP_ID and SHERIFF_APP_KEY_B64 in '" + ENVIRONMENT + "'")
+        return known_app_id(slug), None
     if not interactive:
         raise SheriffError("the '" + ENVIRONMENT + "' environment of " + repo + " has no key for the gate App " + slug +
                            ": run gh sheriff install in a terminal without --yes once; it walks you through adding one")
@@ -350,6 +412,11 @@ def repo_variable(repo, name):
 
 
 def set_variable(repo, name, value):
+    if DRY_RUN:
+        old = repo_variable(repo, name)
+        if old != (value or ""):
+            say("would set " + name + ": " + (old or "(unset)") + " -> " + (value or "(unset)"))
+        return
     if value:
         gh(["variable", "set", name, "--repo", repo, "--body", value])
     else:
@@ -390,6 +457,9 @@ def ensure_secrets(info, names, rotate=False):
         if name in have and not rotate:
             say("ok  " + name + " is in the '" + REVIEW_ENVIRONMENT + "' environment")
             continue
+        if DRY_RUN:
+            say("would ask for " + name + " and store it in the '" + REVIEW_ENVIRONMENT + "' environment")
+            continue
         label, prefix = SECRET_PROMPTS[name]
         value = "".join((os.environ.get(name) or "").split())
         if not value:
@@ -401,7 +471,7 @@ def ensure_secrets(info, names, rotate=False):
 
 
 RELEASE = "v1"
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 SHERIFF_REPO = "nick-the-dev/gh-sheriff"
 FOLLOW_REF = re.compile(r"(nick-the-dev/gh-sheriff/actions/[a-z-]+)@v1 # zizmor: ignore\[unpinned-uses\][^\n]*")
 PINNED_REF = re.compile(r"nick-the-dev/gh-sheriff/actions/[a-z-]+@(v\d+\.\d+\.\d+)")
@@ -631,6 +701,9 @@ def ensure_trigger_files(info, wait_merge=True, pin=""):
     if not stale:
         say("ok  trigger files are current on " + branch)
         return None
+    if DRY_RUN:
+        say("would open the pull request 'Install Sheriff' with " + ", ".join(sorted(stale)) + (" and wait for it to merge" if wait_merge else ""))
+        return None
     me = gh(["api", "user", "--jq", ".login"]).strip()
     listed = gh_json(["pr", "list", "--repo", repo, "--state", "open", "--limit", "200",
                       "--json", "number,headRefName,isCrossRepository,title,author"]) or []
@@ -681,7 +754,9 @@ def ensure_trigger_files(info, wait_merge=True, pin=""):
 
 def ensure_auto_merge(info):
     if not info["auto_merge"]:
-        gh(["api", "-X", "PATCH", "repos/" + info["repo"], "-F", "allow_auto_merge=true"])
+        change("turn on auto-merge for " + info["repo"], ["api", "-X", "PATCH", "repos/" + info["repo"], "-F", "allow_auto_merge=true"])
+        if DRY_RUN:
+            return
     say("ok  auto-merge is on: a pull request merges itself once every required check is green")
 
 
@@ -692,6 +767,9 @@ def run_ids(repo):
 
 def first_run(info):
     repo = info["repo"]
+    if DRY_RUN:
+        say("would start a first Sheriff run and wait for it to succeed")
+        return
     before = run_ids(repo)
     gh(["workflow", "run", "sheriff.yml", "--repo", repo, "--ref", info["branch"]])
     run_id = None
@@ -761,23 +839,49 @@ def gate_statuses_seen(repo, app_slug):
     return False
 
 
-def ensure_ruleset(info, app_id, assume_yes=False):
+def covers(current, wanted):
+    if isinstance(wanted, dict):
+        return isinstance(current, dict) and all(covers(current.get(key), value) for key, value in wanted.items())
+    if isinstance(wanted, list):
+        return isinstance(current, list) and len(current) == len(wanted) and all(any(covers(item, entry) for item in current) for entry in wanted)
+    return current == wanted
+
+
+def required_checks(ruleset):
+    return {(check.get("context"), check.get("integration_id")) for rule in (ruleset or {}).get("rules") or [] if rule.get("type") == "required_status_checks"
+            for check in (rule.get("parameters") or {}).get("required_status_checks") or []}
+
+
+def ruleset_current(current, wanted):
+    return covers(current, wanted) and required_checks(current) == required_checks(wanted)
+
+
+def ensure_ruleset(info, app_id, assume_yes=False, create=True):
     repo = info["repo"]
     rulesets = gh_json(["api", "repos/" + repo + "/rulesets"]) or []
     current = next((item for item in rulesets if item.get("name") == RULESET), None)
+    if current is None and not create:
+        say("--  no '" + RULESET + "' ruleset on " + repo + ": gh sheriff install creates it")
+        return
     if app_id is None:
+        if DRY_RUN:
+            say("would create the '" + RULESET + "' ruleset once the gate App exists")
+            return
         raise SheriffError("the gate App id is unknown; rerun with the App ID at hand")
     ruleset = build_ruleset(existing_required_checks(repo, info["branch"]), app_id)
     checks = ", ".join(c["context"] for c in ruleset["rules"][3]["parameters"]["required_status_checks"])
     if current is None:
         say("..  the '" + RULESET + "' ruleset will require on " + info["branch"] + ": " + checks + "; no bypass, not even for admins")
-        if not assume_yes and input("Apply it now? [y/N] ").strip().lower() != "y":
+        if not DRY_RUN and not assume_yes and input("Apply it now? [y/N] ").strip().lower() != "y":
             say("--  ruleset not applied; run gh sheriff install again to apply it")
             return
-        created = gh_json(["api", "-X", "POST", "repos/" + repo + "/rulesets", "--input", "-"], json.dumps(ruleset))
-        say("ok  ruleset '" + RULESET + "' (" + str(created["id"]) + ") is active")
-    else:
-        gh_json(["api", "-X", "PUT", "repos/" + repo + "/rulesets/" + str(current["id"]), "--input", "-"], json.dumps(ruleset))
+        created = change("create the '" + RULESET + "' ruleset", ["api", "-X", "POST", "repos/" + repo + "/rulesets", "--input", "-"], json.dumps(ruleset))
+        if created:
+            say("ok  ruleset '" + RULESET + "' (" + str(created["id"]) + ") is active")
+    elif ruleset_current(gh_json(["api", "repos/" + repo + "/rulesets/" + str(current["id"])]), ruleset):
+        say("ok  ruleset '" + RULESET + "' is current: " + checks)
+    elif change("rewrite the '" + RULESET + "' ruleset to require " + checks,
+                ["api", "-X", "PUT", "repos/" + repo + "/rulesets/" + str(current["id"]), "--input", "-"], json.dumps(ruleset)) is not None or not DRY_RUN:
         say("ok  ruleset '" + RULESET + "' is current: " + checks)
 
 FIELDS_QUERY = """query($owner:String!,$name:String!){repository(owner:$owner,name:$name){id
@@ -827,11 +931,14 @@ def ensure_issue_fields(info):
             field["options"] = [{"name": option, "color": OPTION_COLORS[index % len(OPTION_COLORS)], "priority": index + 1}
                                 for index, option in enumerate(options)]
         try:
-            WORK.gql(CREATE_FIELD, {"input": field})
+            if work_change("create the issue field '" + name + "' for " + info["owner"], CREATE_FIELD, {"input": field}) is None and DRY_RUN:
+                continue
             say("ok  issue field '" + name + "' created for " + info["owner"])
         except WORK.WorkError as exc:
             say("!!  cannot create the issue field '" + name + "': " + str(exc)[:200])
             say("    if gh lacks the scope: gh auth refresh -s " + scope + ", then gh sheriff install again")
+    if DRY_RUN:
+        return repository
     repository = work_fields(info)
     problems = field_problems(repository)
     for line in problems:
@@ -905,8 +1012,9 @@ def ensure_views(info, repository, project, fields, existing):
             continue
         body = dict({"name": name, "layout": layout, "filter": query, "visible_fields": visible}, **grouping)
         try:
-            gh_json(["api", "-X", "POST", views_path(info, repository, project), "-H", "X-GitHub-Api-Version: " + VIEWS_API_VERSION,
-                     "--input", "-"], json.dumps(body))
+            if change("create the board view '" + name + "'", ["api", "-X", "POST", views_path(info, repository, project), "-H",
+                                                               "X-GitHub-Api-Version: " + VIEWS_API_VERSION, "--input", "-"], json.dumps(body)) is None and DRY_RUN:
+                continue
         except SheriffError as exc:
             say("!!  cannot create the view '" + name + "': " + str(exc)[:200])
             return
@@ -915,23 +1023,29 @@ def ensure_views(info, repository, project, fields, existing):
 
 def ensure_project(info, title, repository):
     project = find_project(info, title)
+    if project is None and DRY_RUN:
+        say("would create the project '" + title + "' for " + info["owner"] + ", linked to " + info["repo"] + ", with the issue fields as columns, "
+            "the views " + ", ".join(spec[0] for spec in view_specs(0, "")) + ", the Stage options in its Status, and the open task issues")
+        return None
     if project is None:
         project = WORK.gql(CREATE_PROJECT, {"input": {"ownerId": repository["owner"]["id"], "title": title,
                                                       "repositoryId": repository["id"]}})["createProjectV2"]["projectV2"]
         say("ok  project '" + title + "' created for " + info["owner"])
     detail = WORK.gql(PROJECT_QUERY, {"id": project["id"]})["node"]
     if repository["id"] not in {node["id"] for node in detail["repositories"]["nodes"]}:
-        WORK.gql(LINK_REPOSITORY, {"input": {"projectId": project["id"], "repositoryId": repository["id"]}})
+        work_change("link the project '" + title + "' to " + info["repo"], LINK_REPOSITORY, {"input": {"projectId": project["id"], "repositoryId": repository["id"]}})
     fields = {node["name"]: node for node in detail["fields"]["nodes"] if node.get("name")}
     issue_fields = {node["name"]: node for node in repository["issueFields"]["nodes"] if node.get("name")}
     for name, _, _ in FIELD_SPECS:
         if name in fields and not fields[name].get("isIssueField"):
             say("!!  the project has its own field '" + name + "': rename it so the issue field can be shown")
             fields.pop(name)
-        elif name not in fields and name in issue_fields:
-            fields[name] = WORK.gql(LINK_FIELD, {"input": {"projectId": project["id"], "issueFieldId": issue_fields[name]["id"]}})[
-                "createProjectV2IssueField"]["projectV2Field"]
-            say("ok  issue field '" + name + "' added to the project")
+        elif name not in fields and (name in issue_fields or DRY_RUN):
+            linked = work_change("add the issue field '" + name + "' to the project as a column", LINK_FIELD,
+                                 {"input": {"projectId": project["id"], "issueFieldId": (issue_fields.get(name) or {}).get("id")}})
+            fields[name] = linked["createProjectV2IssueField"]["projectV2Field"] if linked else {"databaseId": 0, "name": name, "isIssueField": True}
+            if linked:
+                say("ok  issue field '" + name + "' added to the project")
     ensure_views(info, repository, project, fields, {node["name"] for node in detail["views"]["nodes"]})
     ensure_status_options(project)
     return project
@@ -942,9 +1056,14 @@ def ensure_work_state(info, title, wait=False):
         WORK.use_repo(info["repo"])
         repository = ensure_issue_fields(info)
         project = ensure_project(info, title, repository)
-        tasks = [item for item in WORK.issues("OPEN") if item.get("id") or item.get("stage")]
-        if tasks:
-            say("ok  " + str(WORK.add_to_board(project["id"], tasks)) + " open task issue(s) are on the board")
+        if project is None:
+            return False
+        on_board = WORK.board_issues(project["id"])
+        tasks = [item for item in WORK.issues("OPEN") if (item.get("id") or item.get("stage")) and item["node"] not in on_board]
+        if tasks and DRY_RUN:
+            say("would add " + str(len(tasks)) + " open task issue(s) to the board")
+        elif tasks:
+            say("ok  " + str(WORK.add_to_board(project["id"], tasks)) + " open task issue(s) added to the board")
     except WORK.WorkError as exc:
         say("!!  work state: " + str(exc)[:300])
         say("    if gh lacks a scope: gh auth refresh -s project (and -s " + ("admin:org" if info["kind"] == "Organization" else "user") +
@@ -953,6 +1072,64 @@ def ensure_work_state(info, title, wait=False):
     say("ok  project '" + title + "': " + project["url"])
     wait_for_auto_add(info, project, wait)
     return not field_problems(repository)
+
+
+def project_title(repo, explicit=None):
+    return explicit or repo_variable(repo, "SHERIFF_PROJECT") or WORK.default_board(repo)
+
+
+def turn_on_work_state(info, explicit, wait):
+    repo, title = info["repo"], project_title(info["repo"], explicit)
+    was_on, kept = repo_variable(repo, "SHERIFF_WORK_STATE") == "on", repo_variable(repo, "SHERIFF_WORK_STATE_SINCE")
+    if not ensure_work_state(info, title, wait) and not DRY_RUN:
+        say("!!  work state stays on, but its setup is incomplete: fix the problems above" if was_on else "--  work state stays off until the issue fields exist")
+        return False
+    since = (kept if was_on else "") or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    if explicit and explicit != repo_variable(repo, "SHERIFF_PROJECT"):
+        set_variable(repo, "SHERIFF_PROJECT", explicit)
+    if since != kept:
+        set_variable(repo, "SHERIFF_WORK_STATE_SINCE", since)
+    if not was_on:
+        set_variable(repo, "SHERIFF_WORK_STATE", "on")
+    if DRY_RUN:
+        sync_preview(repo, since, title)
+        return True
+    say("ok  work state is on: pull requests and releases move each task's Stage")
+    say("    issues closed before " + since + " (SHERIFF_WORK_STATE_SINCE) keep their Stage: Sheriff audits Verified evidence only after it")
+    say(STATUS_NOTE)
+    return True
+
+
+def sync_preview(repo, since, title):
+    WORK.use_repo(repo)
+    WORK.VARIABLES.update({"SHERIFF_WORK_STATE_SINCE": since, "SHERIFF_PROJECT": title})
+    try:
+        result = WORK.sync(False)
+    except WORK.WorkError as exc:
+        say("--  cannot preview the next sync: " + str(exc)[:200])
+        return
+    if result.get("skipped"):
+        say("--  next sync: " + result["skipped"])
+        return
+    changes = result["changes"]
+    reopened = sum(1 for entry in changes if entry.get("why") == WORK.REVERT_WHY and not entry.get("open"))
+    closed = sum(1 for entry in changes if entry["to"] == "Verified" and entry.get("open"))
+    say("..  the next sync would move " + str(len(changes)) + " task(s), reopen " + str(reopened) + " and close " + str(closed) +
+        "; issues closed before " + since + " are not audited (gh sheriff task sync lists each move)")
+
+
+def evidence_problems(repo):
+    problems = [] if repo_variable(repo, "SHERIFF_WORK_STATE_SINCE") else [
+        "SHERIFF_WORK_STATE_SINCE is not set, so closed issues are not audited for Verified evidence; gh sheriff update sets it"]
+    try:
+        WORK.use_repo(repo)
+        pending = WORK.reverts(WORK.sync(False))
+    except WORK.WorkError as exc:
+        say("--  could not preview the next work-state sync: " + str(exc)[:200])
+        return problems
+    if pending:
+        say("!!  the next sync sets " + str(pending) + " Verified task(s) without recorded evidence back: gh sheriff task sync lists them")
+    return problems
 
 
 def work_state_problems(info, title):
@@ -998,7 +1175,9 @@ def ensure_status_options(project):
     options = [{"name": option["name"], "color": option["color"], "description": option.get("description") or ""} for option in existing]
     options += [{"name": name, "color": STAGE_OPTION_COLORS[name], "description": ""} for name in missing]
     try:
-        WORK.gql(UPDATE_STATUS_OPTIONS, {"input": {"fieldId": field["id"], "singleSelectOptions": options}})
+        if work_change("add the Status options " + ", ".join(missing) + " and set each item's Status to its Stage", UPDATE_STATUS_OPTIONS,
+                       {"input": {"fieldId": field["id"], "singleSelectOptions": options}}) is None and DRY_RUN:
+            return
     except WORK.WorkError as exc:
         say("!!  could not add the Status options " + ", ".join(missing) + " (" + str(exc)[:120] + "): add them in the board's Status field settings")
         return
@@ -1115,15 +1294,19 @@ def install(args):
     if not info["admin"]:
         raise SheriffError("installing Sheriff needs admin rights on " + info["repo"])
     say("Sheriff for " + info["repo"] + " (" + ("organisation" if info["kind"] == "Organization" else "personal account") + ", default branch " + info["branch"] + ")")
+    interactive = sys.stdin.isatty() and not args.yes and not DRY_RUN
     ensure_environment(info)
     ensure_environment(info, REVIEW_ENVIRONMENT)
-    app_id, pem = ensure_gate_app(info, args.new_key, sys.stdin.isatty() and not args.yes)
+    app_id, pem = ensure_gate_app(info, args.new_key, interactive)
     app_id = app_id or known_app_id(slug_for(info["owner"]))
     if app_id:
         set_variable(info["repo"], "SHERIFF_APP_ID", str(app_id))
-    set_variable(info["repo"], "SHERIFF_APP_SLUG", slug_for(info["owner"]))
-    ensure_installed(info, app_id, pem, sys.stdin.isatty() and not args.yes)
-    interactive = sys.stdin.isatty() and not args.yes
+    try:
+        ensure_installed(info, app_id, pem, interactive)
+    except SheriffError as exc:
+        if not DRY_RUN:
+            raise
+        say("would wait until the App can reach " + info["repo"] + ": " + str(exc))
     ensure_secrets(info, sorted(set(choose_reviewers(info, args.first_pass, args.review_model, interactive)) | ensure_planning(info, args.plan, new)),
                    args.rotate_secrets)
     ensure_merges(info, args.merges, new)
@@ -1137,15 +1320,47 @@ def install(args):
     ensure_trigger_files(info, pin=pin)
     ensure_auto_merge(info)
     first_run(info)
-    ensure_ruleset(info, app_id, args.yes)
-    if not args.no_work_state:
-        if ensure_work_state(info, args.project_name or WORK.board_title(info["repo"]), sys.stdin.isatty() and not args.yes):
-            set_variable(info["repo"], "SHERIFF_WORK_STATE", "on")
-            say("ok  work state is on: pull requests and releases move each task's Stage")
-            say(STATUS_NOTE)
-        else:
-            say("--  work state stays off until the issue fields exist")
-    say("Done. Every new pull request head is now reviewed by Sheriff, and GitHub merges only what Sheriff marks green.")
+    ensure_ruleset(info, app_id, args.yes or DRY_RUN)
+    if not args.no_work_state and (new or repo_variable(info["repo"], "SHERIFF_WORK_STATE") == "on"):
+        if not turn_on_work_state(info, args.project_name, interactive):
+            raise SheriffError("work state is not set up; fix the problems above and run gh sheriff install again")
+    else:
+        say("--  work state stays off" + ("" if args.no_work_state else " on this existing install: gh sheriff update --work-state on turns it on"))
+        no_effect(args.project_name)
+    set_variable(info["repo"], "SHERIFF_APP_SLUG", slug_for(info["owner"]))
+    say("Dry run done: nothing was changed." if DRY_RUN else
+        "Done. Every new pull request head is now reviewed by Sheriff, and GitHub merges only what Sheriff marks green.")
+
+
+def no_effect(project_name):
+    if project_name:
+        say("!!  --project-name has no effect while work state is off")
+
+
+def update(args):
+    info = repo_info(resolve_repo(args.repo))
+    repo = info["repo"]
+    if not info["admin"]:
+        raise SheriffError("updating Sheriff needs admin rights on " + repo)
+    if not repo_variable(repo, "SHERIFF_APP_SLUG"):
+        raise SheriffError("Sheriff is not installed on " + repo + ": run gh sheriff install")
+    say("Updating Sheriff on " + repo + " to v" + VERSION + (" (dry run: lines starting with 'would' are the changes; nothing is written)" if DRY_RUN else ""))
+    ensure_trigger_files(info, pin=update_pin(info, None))
+    app_id = repo_variable(repo, "SHERIFF_APP_ID")
+    ensure_ruleset(info, int(app_id) if app_id.isdigit() else known_app_id(slug_for(info["owner"])), True, create=False)
+    on = repo_variable(repo, "SHERIFF_WORK_STATE") == "on"
+    if args.work_state != "off" and (on or args.work_state == "on"):
+        if not turn_on_work_state(info, args.project_name, False):
+            raise SheriffError("work state is not set up; fix the problems above and run gh sheriff update again")
+    elif args.work_state == "off" and on:
+        set_variable(repo, "SHERIFF_WORK_STATE", "off")
+        if not DRY_RUN:
+            say("ok  work state is off; the issue fields, the board and every Stage stay as they are")
+        no_effect(args.project_name)
+    else:
+        say("--  work state is " + ("already off" if args.work_state == "off" else "off: gh sheriff update --work-state on turns it on"))
+        no_effect(args.project_name)
+    say("Dry run done: nothing was changed." if DRY_RUN else "Done: Sheriff on " + repo + " matches v" + VERSION + ".")
 
 
 def doctor(args):
@@ -1208,7 +1423,8 @@ def doctor(args):
         if detail.get("enforcement") != "active":
             problems.append("the ruleset is not active")
     if repo_variable(repo, "SHERIFF_WORK_STATE") == "on" and not args.no_work_state:
-        problems += work_state_problems(info, args.project_name or WORK.board_title(repo))
+        title = project_title(repo, args.project_name)
+        problems += work_state_problems(info, title) + evidence_problems(repo)
         say(STATUS_NOTE)
         if info["kind"] == "Organization":
             problem = projects_permission_problem(info, slug)
@@ -1216,17 +1432,17 @@ def doctor(args):
                 problems.append(problem)
         else:
             say("--  GitHub Apps cannot write user-owned boards, so Status is mirrored only when you run gh sheriff task board-status --apply with your own gh login")
-        WORK.REPO = repo
-        stale = status_differs(args.project_name or WORK.board_title(repo))
+        WORK.use_repo(repo)
+        stale = status_differs(title)
         if stale:
             say("!!  " + str(stale) + " board item(s) have a built-in Status that differs from their Stage: run gh sheriff task board-status --apply")
     elif not args.no_work_state:
-        say("--  work state is off (repository variable SHERIFF_WORK_STATE is not 'on'); gh sheriff install turns it on")
+        say("--  work state is off (repository variable SHERIFF_WORK_STATE is not 'on'); gh sheriff update --work-state on turns it on")
     for line in merge_notes(repo, repo_variable(repo, "SHERIFF_MERGE_MODE")) + update_lines:
         say(line)
     for line in problems:
         say("!!  " + line)
-    say("ok  Sheriff is set up correctly on " + repo if not problems else str(len(problems)) + " problem(s); gh sheriff install fixes them")
+    say("ok  Sheriff is set up correctly on " + repo if not problems else str(len(problems)) + " problem(s); gh sheriff update fixes what an existing install lacks")
     return 1 if problems else 0
 
 
@@ -1328,7 +1544,13 @@ def main(argv=None):
     install_parser.add_argument("--no-browser", action="store_true", help="print the pages to open instead of opening them")
     install_parser.add_argument("--no-files", action="store_true", help="do not open a pull request with the trigger files; add them yourself")
     install_parser.add_argument("--no-work-state", action="store_true", help="skip the issue fields and the project board")
-    install_parser.add_argument("--project-name", help="title of the repository's project board (default: the repository's name plus ' work')")
+    install_parser.add_argument("--project-name", help="title of the repository's project board, saved as SHERIFF_PROJECT (default: SHERIFF_PROJECT, else the repository's name plus ' work')")
+    install_parser.add_argument("--dry-run", action="store_true", help="change nothing; print every change install would make")
+    update_parser = sub.add_parser("update", help="bring an existing install to this release, keeping every setting you chose")
+    update_parser.add_argument("--repo", help="owner/name (default: the repository in the current folder)")
+    update_parser.add_argument("--work-state", choices=("on", "off"), help="turn work state on (Verified evidence is audited only for issues closed from now) or off")
+    update_parser.add_argument("--project-name", help="the existing board to use with --work-state on, saved as SHERIFF_PROJECT")
+    update_parser.add_argument("--dry-run", action="store_true", help="change nothing; print every change update would make")
     models_parser = sub.add_parser("models", help="choose the cheap first-pass and the final reviewer")
     models_parser.add_argument("--repo", help="owner/name (default: the repository in the current folder)")
     models_parser.add_argument("--first-pass", help="provider:model, or '' for none")
@@ -1341,15 +1563,16 @@ def main(argv=None):
     doctor_parser = sub.add_parser("doctor", help="check that Sheriff is set up correctly")
     doctor_parser.add_argument("--repo", help="owner/name (default: the repository in the current folder)")
     doctor_parser.add_argument("--no-work-state", action="store_true", help="do not check the issue fields and the project board")
-    doctor_parser.add_argument("--project-name", help="title of the repository's project board (default: the repository's name plus ' work')")
+    doctor_parser.add_argument("--project-name", help="title of the repository's project board (default: SHERIFF_PROJECT, else the repository's name plus ' work')")
     task_parser = sub.add_parser("task", help="record work as issues whose Stage follows pull requests and releases")
     WORK.add_commands(task_parser)
     args = parser.parse_args(argv)
-    global OPEN_BROWSER
+    global OPEN_BROWSER, DRY_RUN
     OPEN_BROWSER = not getattr(args, "no_browser", False)
+    DRY_RUN = bool(getattr(args, "dry_run", False))
     try:
-        if args.command == "install":
-            install(args)
+        if args.command in ("install", "update"):
+            {"install": install, "update": update}[args.command](args)
             return 0
         if args.command == "task":
             return WORK.run_cli(args)

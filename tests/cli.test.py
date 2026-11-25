@@ -767,5 +767,251 @@ class ReadmeTests(unittest.TestCase):
             self.assertIn(part, section)
 
 
+class DryRunTests(unittest.TestCase):
+    def setUp(self):
+        cli.DRY_RUN = True
+        self.addCleanup(setattr, cli, "DRY_RUN", False)
+
+    def test_writes_are_told_apart_from_reads(self):
+        for args, stdin, expected in ((["api", "-X", "POST", "x"], None, True), (["api", "--method", "get", "x"], None, False), (["api", "repos/o/r"], None, False),
+                                      (["api", "x", "-f", "a=b"], None, True), (["api", "graphql", "--input", "-"], '{"query": "mutation{x}"}', True),
+                                      (["api", "graphql", "--input", "-"], '{"query": "query{x}"}', False), (["secret", "set", "K"], None, True),
+                                      (["variable", "get", "V"], None, False), (["pr", "create"], None, True), (["workflow", "run", "w"], None, True),
+                                      (["run", "list"], None, False)):
+            with self.subTest(args=args):
+                self.assertEqual(cli.writes(args, stdin), expected)
+
+    def test_a_write_is_refused_before_anything_runs_and_reads_still_work(self):
+        with mock.patch.object(cli.subprocess, "run", side_effect=AssertionError("ran")):
+            with self.assertRaisesRegex(cli.SheriffError, "dry run"):
+                cli.gh(["api", "-X", "PUT", "repos/o/r/rulesets/1"])
+            with self.assertRaisesRegex(cli.SheriffError, "dry run"):
+                cli.WORK.gql("mutation{x}")
+        with mock.patch.object(cli.subprocess, "run", return_value=mock.Mock(returncode=0, stdout="{}", stderr="")):
+            self.assertEqual(cli.gh_json(["api", "repos/o/r"]), {})
+
+    def test_variables_and_secrets_are_only_described(self):
+        out = io.StringIO()
+        with mock.patch.object(cli, "repo_variable", side_effect=lambda repo, name: {"A": "1"}.get(name, "")), \
+                mock.patch.object(cli.subprocess, "run", side_effect=AssertionError("ran")), mock.patch("sys.stdout", out):
+            cli.set_variable("o/r", "A", "1")
+            cli.set_variable("o/r", "A", "2")
+            cli.set_variable("o/r", "B", "x")
+            cli.set_env_secret("o/r", "KEY", "secret-value")
+        self.assertEqual(out.getvalue().splitlines(), ["would set A: 1 -> 2", "would set B: (unset) -> x",
+                                                       "would store the secret KEY in the 'sheriff' environment"])
+        self.assertNotIn("secret-value", out.getvalue())
+
+    def test_the_trigger_files_pull_request_is_only_described(self):
+        out = io.StringIO()
+        with mock.patch.object(cli, "wanted_files", lambda info, pin: {".github/workflows/sheriff.yml": "new"}), \
+                mock.patch.object(cli, "remote_file", lambda repo, path, ref: "old"), mock.patch("sys.stdout", out):
+            self.assertIsNone(cli.ensure_trigger_files({"repo": "o/r", "branch": "main"}))
+        self.assertIn("would open the pull request 'Install Sheriff' with .github/workflows/sheriff.yml", out.getvalue())
+
+    def test_the_first_sync_preview_counts_moves_reopens_and_closes(self):
+        result = {"changes": [{"to": "Released", "open": False, "why": cli.WORK.REVERT_WHY}, {"to": "Verified", "open": True}, {"to": "Candidate", "open": True}]}
+        out = io.StringIO()
+        with mock.patch.object(cli.WORK, "use_repo", lambda repo: repo), mock.patch.object(cli.WORK, "sync", lambda apply: result), mock.patch("sys.stdout", out):
+            cli.sync_preview("o/r", "2026-11-25T00:00:00Z", "r work")
+        self.assertIn("next sync would move 3 task(s), reopen 1 and close 1", out.getvalue())
+        self.assertEqual(cli.WORK.VARIABLES["SHERIFF_WORK_STATE_SINCE"], "2026-11-25T00:00:00Z")
+
+
+class RulesetUpdateTests(unittest.TestCase):
+    def run_ruleset(self, current, create=True, dry=False):
+        calls, out = [], io.StringIO()
+        wanted = cli.build_ruleset({}, 42)
+
+        def fake(args, stdin=None):
+            calls.append(args[:3])
+            if args == ["api", "repos/o/r/rulesets"]:
+                return [{"id": 7, "name": "Sheriff"}] if current is not None else []
+            if args == ["api", "repos/o/r/rulesets/7"]:
+                return current
+            return {"id": 8}
+        cli.DRY_RUN = dry
+        self.addCleanup(setattr, cli, "DRY_RUN", False)
+        with mock.patch.object(cli, "gh_json", fake), mock.patch.object(cli, "existing_required_checks", lambda repo, branch: {}), mock.patch("sys.stdout", out):
+            cli.ensure_ruleset({"repo": "o/r", "branch": "main"}, 42, True, create)
+        return [call for call in calls if "-X" in call], wanted, out.getvalue()
+
+    def test_a_current_ruleset_is_not_rewritten(self):
+        wanted = cli.build_ruleset({}, 42)
+        current = dict(wanted, id=7, source="o/r", rules=[dict(rule, extra=1) for rule in wanted["rules"]])
+        self.assertEqual(self.run_ruleset(current)[0], [])
+
+    def test_an_outdated_ruleset_is_rewritten_unless_dry(self):
+        outdated = dict(cli.build_ruleset({}, 41), id=7)
+        self.assertEqual(self.run_ruleset(outdated)[0], [["api", "-X", "PUT"]])
+        writes, _, out = self.run_ruleset(outdated, dry=True)
+        self.assertEqual((writes, "would rewrite the 'Sheriff' ruleset" in out), ([], True))
+
+    def test_update_never_creates_a_missing_ruleset(self):
+        writes, _, out = self.run_ruleset(None, create=False)
+        self.assertEqual((writes, "gh sheriff install creates it" in out), ([], True))
+
+
+class WorkStateSwitchTests(unittest.TestCase):
+    def switch(self, variables, explicit=None):
+        written = {}
+        with mock.patch.object(cli, "repo_variable", side_effect=lambda repo, name: variables.get(name, "")), \
+                mock.patch.object(cli, "set_variable", side_effect=lambda repo, name, value: written.__setitem__(name, value)), \
+                mock.patch.object(cli, "ensure_work_state", lambda info, title, wait: True), mock.patch.object(cli.time, "strftime", lambda fmt, at: "NOW"), \
+                mock.patch("sys.stdout", io.StringIO()):
+            cli.turn_on_work_state(ORG, explicit, False)
+        return written
+
+    def test_turning_on_starts_a_fresh_cutoff_and_saves_the_board(self):
+        self.assertEqual(self.switch({"SHERIFF_WORK_STATE": "off", "SHERIFF_WORK_STATE_SINCE": "OLD"}, "Team board"),
+                         {"SHERIFF_PROJECT": "Team board", "SHERIFF_WORK_STATE_SINCE": "NOW", "SHERIFF_WORK_STATE": "on"})
+
+    def test_work_state_already_on_keeps_its_cutoff_or_fills_a_missing_one(self):
+        self.assertEqual(self.switch({"SHERIFF_WORK_STATE": "on", "SHERIFF_WORK_STATE_SINCE": "OLD", "SHERIFF_PROJECT": "B"}, "B"), {})
+        self.assertEqual(self.switch({"SHERIFF_WORK_STATE": "on"}), {"SHERIFF_WORK_STATE_SINCE": "NOW"})
+
+
+class UpdateCommandTests(unittest.TestCase):
+    def update(self, variables, *flags, failing=False):
+        calls, written, out = [], {}, io.StringIO()
+        refused = {name: mock.Mock(side_effect=AssertionError(name + " must not run")) for name in
+                   ("ensure_environment", "ensure_gate_app", "ensure_secrets", "choose_reviewers", "ensure_planning", "ensure_merges", "first_run", "ensure_auto_merge")}
+        patches = dict(refused, repo_info=lambda repo: {"repo": "o/r", "owner": "o", "kind": "Organization", "branch": "main", "admin": True},
+                       repo_variable=lambda repo, name: variables.get(name, ""), set_variable=lambda repo, name, value: written.__setitem__(name, value),
+                       update_pin=lambda info, choice: calls.append(("pin", choice)) or "",
+                       ensure_trigger_files=lambda info, wait_merge=True, pin="": calls.append(("files", pin)),
+                       ensure_ruleset=lambda info, app_id, assume_yes=False, create=True: calls.append(("ruleset", app_id, create)),
+                       turn_on_work_state=lambda info, explicit, wait: calls.append(("work state", explicit)) or not failing)
+        with mock.patch.multiple(cli, **patches), mock.patch("sys.stdout", out):
+            code = cli.main(["update", "--repo", "o/r"] + list(flags))
+        return code, calls, written, out.getvalue()
+
+    def test_a_repository_without_sheriff_is_sent_to_install(self):
+        code, calls, written, out = self.update({})
+        self.assertEqual((code, calls, written), (1, [], {}))
+        self.assertIn("run gh sheriff install", out)
+
+    def test_update_refreshes_files_and_ruleset_and_keeps_work_state_as_it_is(self):
+        installed = {"SHERIFF_APP_SLUG": "o-sheriff", "SHERIFF_APP_ID": "42"}
+        code, calls, written, out = self.update(installed)
+        self.assertEqual((code, calls, written), (0, [("pin", None), ("files", ""), ("ruleset", 42, False)], {}))
+        self.assertIn("update --work-state on turns it on", out)
+        self.assertEqual(self.update(dict(installed, SHERIFF_WORK_STATE="on"))[1][-1], ("work state", None))
+
+    def test_work_state_is_switched_only_when_asked(self):
+        installed = {"SHERIFF_APP_SLUG": "o-sheriff", "SHERIFF_APP_ID": "42"}
+        self.assertEqual(self.update(installed, "--work-state", "on", "--project-name", "Team board")[1][-1], ("work state", "Team board"))
+        self.assertEqual(self.update(dict(installed, SHERIFF_WORK_STATE="on"), "--work-state", "off")[2], {"SHERIFF_WORK_STATE": "off"})
+
+    def test_dry_run_is_switched_on_for_the_command_and_off_afterwards(self):
+        seen = []
+        with mock.patch.object(cli, "update", side_effect=lambda args: seen.append(cli.DRY_RUN)):
+            cli.main(["update", "--dry-run"])
+        with mock.patch.object(cli, "install", side_effect=lambda args: seen.append(cli.DRY_RUN)):
+            cli.main(["install"])
+        self.assertEqual(seen, [True, False])
+
+
+class InstallWorkStateTests(unittest.TestCase):
+    def test_a_rerun_never_turns_work_state_on_for_an_existing_install(self):
+        for variables, expected in (({"SHERIFF_APP_SLUG": "o-sheriff"}, []), ({"SHERIFF_APP_SLUG": "o-sheriff", "SHERIFF_WORK_STATE": "on"}, [None]), ({}, [None])):
+            with self.subTest(variables=variables):
+                turned = []
+                steps = {name: mock.Mock(return_value=(42, None) if name == "ensure_gate_app" else set()) for name in
+                         ("ensure_environment", "ensure_gate_app", "ensure_installed", "ensure_secrets", "choose_reviewers", "ensure_planning", "ensure_merges",
+                          "ensure_trigger_files", "ensure_auto_merge", "first_run", "ensure_ruleset", "set_variable")}
+                with mock.patch.multiple(cli, **steps, repo_info=lambda repo: {"repo": "o/r", "owner": "o", "kind": "Organization", "branch": "main", "admin": True},
+                                         repo_variable=lambda repo, name: variables.get(name, ""), update_pin=lambda info, choice: "",
+                                         turn_on_work_state=lambda info, explicit, wait: turned.append(explicit)), mock.patch("sys.stdout", io.StringIO()):
+                    cli.main(["install", "--repo", "o/r", "--yes"])
+                self.assertEqual(turned, expected)
+
+
+class BoardItemsTests(unittest.TestCase):
+    def test_only_open_tasks_missing_from_the_board_are_added(self):
+        added, out = [], io.StringIO()
+        items = [{"id": "A", "stage": None, "node": "N1"}, {"id": "B", "stage": "Candidate", "node": "N2"}, {"id": None, "stage": None, "node": "N3"}]
+        with mock.patch.multiple(cli, ensure_issue_fields=lambda info: repository(ALL_FIELDS), ensure_project=lambda info, title, repo: {"id": "P", "url": "u"},
+                                 wait_for_auto_add=lambda info, project, wait: True), \
+                mock.patch.multiple(cli.WORK, use_repo=lambda repo: repo, board_issues=lambda board: {"N1"}, issues=lambda state="OPEN", pages=0: items,
+                                    add_to_board=lambda board, tasks: added.extend(tasks) or len(tasks)), mock.patch("sys.stdout", out):
+            self.assertTrue(cli.ensure_work_state(ORG, "r work"))
+        self.assertEqual([item["id"] for item in added], ["B"])
+
+
+class ReviewFindingTests(unittest.TestCase):
+    def test_a_graphql_read_naming_mutation_is_not_a_write(self):
+        read = json.dumps({"query": 'query{repository(owner:"mutation-testing",name:"mutation"){id}}'})
+        self.assertFalse(cli.writes(["api", "graphql", "--input", "-"], read))
+        self.assertTrue(cli.writes(["api", "graphql", "--input", "-"], json.dumps({"query": "  mutation($id:ID!){x}"})))
+        self.assertTrue(cli.writes(["api", "graphql", "-f", "query=mutation{x}"]))
+        self.assertFalse(cli.writes(["api", "graphql", "-f", "query=query{mutation:viewer{login}}"]))
+
+    def test_a_retried_first_install_still_counts_as_new_because_the_slug_is_written_last(self):
+        order = []
+        steps = {name: mock.Mock(return_value=(42, None) if name == "ensure_gate_app" else set()) for name in
+                 ("ensure_environment", "ensure_gate_app", "ensure_installed", "ensure_secrets", "choose_reviewers", "ensure_planning", "ensure_merges",
+                  "ensure_trigger_files", "ensure_auto_merge", "first_run", "ensure_ruleset")}
+        with mock.patch.multiple(cli, **steps, repo_info=lambda repo: {"repo": "o/r", "owner": "o", "kind": "Organization", "branch": "main", "admin": True},
+                                 repo_variable=lambda repo, name: "", update_pin=lambda info, choice: "",
+                                 set_variable=lambda repo, name, value: order.append(name),
+                                 turn_on_work_state=lambda info, explicit, wait: order.append("work state") or True), mock.patch("sys.stdout", io.StringIO()):
+            cli.main(["install", "--repo", "o/r", "--yes"])
+        self.assertEqual(order[-2:], ["work state", "SHERIFF_APP_SLUG"])
+
+    def test_an_incomplete_work_state_setup_is_not_reported_as_done(self):
+        out = io.StringIO()
+        with mock.patch.multiple(cli, repo_variable=lambda repo, name: "on" if name == "SHERIFF_WORK_STATE" else "", ensure_work_state=lambda info, title, wait: False,
+                                 set_variable=mock.Mock(side_effect=AssertionError("no write"))), mock.patch("sys.stdout", out):
+            self.assertFalse(cli.turn_on_work_state(ORG, None, False))
+        self.assertIn("work state stays on, but its setup is incomplete", out.getvalue())
+        code, _, _, text = UpdateCommandTests.update(self, {"SHERIFF_APP_SLUG": "s", "SHERIFF_APP_ID": "42", "SHERIFF_WORK_STATE": "on"}, failing=True)
+        self.assertEqual((code, "Done" in text), (1, False))
+
+    def test_messages_say_what_would_happen_and_warn_about_an_unused_board(self):
+        installed = {"SHERIFF_APP_SLUG": "s", "SHERIFF_APP_ID": "42"}
+        cli.DRY_RUN = True
+        self.addCleanup(setattr, cli, "DRY_RUN", False)
+        _, _, _, text = UpdateCommandTests.update(self, dict(installed, SHERIFF_WORK_STATE="on"), "--work-state", "off", "--project-name", "B", "--dry-run")
+        self.assertNotIn("ok  work state is off", text)
+        self.assertIn("--project-name has no effect", text)
+
+    def test_a_dry_run_lists_the_branch_policies_an_existing_environment_would_lose(self):
+        out = io.StringIO()
+        current = {"deployment_branch_policy": {"protected_branches": False, "custom_branch_policies": True}}
+        policies = {"branch_policies": [{"id": 1, "name": "main"}, {"id": 2, "name": "release/*"}]}
+        cli.DRY_RUN = True
+        self.addCleanup(setattr, cli, "DRY_RUN", False)
+        with mock.patch.object(cli, "gh_status", lambda args: True), mock.patch.object(cli, "gh_json", lambda args, stdin=None: policies if args[1].endswith("policies") else current), \
+                mock.patch("sys.stdout", out):
+            cli.ensure_environment({"repo": "o/r", "branch": "main"})
+        self.assertEqual(out.getvalue().splitlines(), ["would remove the branch policy 'release/*' from the 'sheriff' environment"])
+
+    def test_a_differently_configured_environment_still_has_its_policies_read(self):
+        out = io.StringIO()
+        policies = {"branch_policies": [{"id": 2, "name": "dev"}]}
+        cli.DRY_RUN = True
+        self.addCleanup(setattr, cli, "DRY_RUN", False)
+        with mock.patch.object(cli, "gh_status", lambda args: True), \
+                mock.patch.object(cli, "gh_json", lambda args, stdin=None: policies if args[1].endswith("policies") else {"deployment_branch_policy": None}), \
+                mock.patch("sys.stdout", out):
+            cli.ensure_environment({"repo": "o/r", "branch": "main"})
+        self.assertIn("would remove the branch policy 'dev'", out.getvalue())
+        self.assertNotIn("ok  environment", out.getvalue())
+
+    def test_a_different_integration_id_on_a_required_check_rewrites_the_ruleset(self):
+        wanted = cli.build_ruleset({"Lint": None}, 42)
+        current = cli.build_ruleset({"Lint": 5}, 42)
+        self.assertFalse(cli.ruleset_current(current, wanted))
+        self.assertTrue(cli.ruleset_current(cli.build_ruleset({"Lint": None}, 42), wanted))
+
+    def test_update_by_a_non_admin_says_so(self):
+        out = io.StringIO()
+        with mock.patch.multiple(cli, repo_info=lambda repo: {"repo": "o/r", "owner": "o", "kind": "User", "branch": "main", "admin": False},
+                                 repo_variable=lambda repo, name: ""), mock.patch("sys.stdout", out):
+            self.assertEqual(cli.main(["update", "--repo", "o/r"]), 1)
+        self.assertIn("needs admin rights", out.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()

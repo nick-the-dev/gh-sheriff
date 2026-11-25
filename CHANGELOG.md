@@ -7,6 +7,58 @@ release is made.
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-11-25
+
+### Added
+
+- **`gh sheriff update`** brings an existing install to the current release: it opens the trigger-files pull request only
+  when the templates changed, rewrites the `Sheriff` ruleset only when it differs, and, while work state is on, adds
+  missing issue fields, board columns, views and open task issues and fills in variables a release needs. It never
+  touches secrets, reviewer models, the plan, merge or updates modes, the board's own Status options or views, and
+  never turns a feature on or off. `--work-state on [--project-name "<board>"]` turns work state on with a fresh
+  `SHERIFF_WORK_STATE_SINCE`; `--work-state off` turns it off and keeps its data.
+- **`--dry-run`** on `install` and `update` writes nothing (any write is refused) and prints every change: variables
+  with old and new values, secret names, environments, the ruleset, the trigger-files pull request, issue fields, the
+  board (created or reused, columns, views, Status options, items), and, when work state would be on, a preview of the
+  first sync: how many tasks it would move, reopen and close.
+- **Adopting work state is safe for existing history.** `install` and `update --work-state on` set `SHERIFF_WORK_STATE_SINCE`
+  when they turn work state on, and the evidence audit (Verified without recorded evidence moves back and the issue reopens) covers only open
+  issues and issues closed after it. `gh sheriff doctor` and a dry-run `gh sheriff task sync` say how many tasks the
+  next sync would set back.
+- `SHERIFF_PROJECT` names the work board. `install --project-name` saves it, and `task new`, `task board-status`,
+  `doctor` and the Status mirror use it instead of `<repo> work`.
+- `gh sheriff task ask <ID> --question "..." [--to <login>]` asks a person: it labels the issue `sheriff:needs-person`,
+  @mentions and assigns them (default `SHERIFF_DECIDERS`), and the task leaves `ready` until `task ask <ID> --clear`.
+- `gh sheriff task show <ID>`, `gh sheriff task drop <ID> --reason "..."` (closes as not planned and releases the claim),
+  and `task new --blocked-by <ID> --blocks <ID>`.
+- Items in `status --json` carry `priority` (from `priority:P*` labels), `updated`, `closed`, `asked`, `assignees` and
+  each blocker's `title`. `ready` and `needs_you` are ordered by priority, then age; `ready` also leaves out tasks with an
+  open pull request or an open question, and `needs_you` also lists issues labelled `sheriff:needs-decision` or
+  `sheriff:needs-person`.
+- The sync makes an open task issue without a Stage a Candidate (Verify by "Live check" if empty), and returns In
+  progress work whose pull requests were all closed without merging to Candidate, releasing its claim. The state job
+  also runs when an issue is opened or retitled.
+- `task verify` finds the task's merge by searching for its ID, not only among the 200 most recent merged pull requests,
+  and verifies work that no pull request names (its evidence comment carries `sha=none`).
+- `SHERIFF_HEALTH_URL` also gates Released: no task becomes Released while it does not return 200. Outside CI, `task`
+  commands, `doctor` and dry runs read `SHERIFF_VERSION_URL`, `SHERIFF_DEPLOY_WORKFLOW` and `SHERIFF_HEALTH_URL` from the
+  repository variables.
+
+### Changed
+
+- Without `SHERIFF_WORK_STATE_SINCE`, closed issues are no longer audited for Verified evidence; open issues still are.
+- Re-running `install` on an existing install no longer turns work state on; `gh sheriff update --work-state on` does.
+- `install` rewrites the `Sheriff` ruleset only when it differs from the current rules.
+- `gh sheriff doctor` and the work-state messages recommend `gh sheriff update` for what an existing install lacks.
+
+### Upgrading
+
+- Run `gh extension upgrade sheriff`, then `gh sheriff update` (add `--dry-run` first to see every change). It opens a
+  pull request with the new `sheriff.yml`, whose state job runs when an issue is opened or retitled and passes
+  `SHERIFF_HEALTH_URL`, `SHERIFF_PROJECT` and `SHERIFF_WORK_STATE_SINCE` to the sync, and on a repository whose work
+  state is already on it sets `SHERIFF_WORK_STATE_SINCE`, so closed issues are audited again from then on. Until then
+  the old file keeps working without those.
+
 ## [1.2.0] - 2026-11-25
 
 ### Added
@@ -92,7 +144,8 @@ First versioned release. Sheriff is in beta: behaviour, settings and messages ca
   a person set is never changed.
 - Plans and reviews are written in plain language.
 
-[Unreleased]: https://github.com/nick-the-dev/gh-sheriff/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/nick-the-dev/gh-sheriff/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/nick-the-dev/gh-sheriff/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/nick-the-dev/gh-sheriff/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/nick-the-dev/gh-sheriff/compare/v1.0.2...v1.1.0
 [1.0.2]: https://github.com/nick-the-dev/gh-sheriff/compare/v1.0.1...v1.0.2
