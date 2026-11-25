@@ -42,7 +42,7 @@ gh sheriff install
 flowchart TB
     subgraph PLAN["Plan every task"]
         direction LR
-        I["Task issue opened"] --> P["Smart model writes the plan"] --> K["Agent claims the task"] --> W["Agent works to the plan"]
+        I["Task issue opened"] --> P["Smart model writes the plan"] --> K["Agent claims the task (gh sheriff task claim)"] --> W["Agent works to the plan"]
         W -->|"plan cannot work"| R["/sheriff replan"] --> P
     end
     subgraph REVIEW["Review every push"]
