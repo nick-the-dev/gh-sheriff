@@ -24,7 +24,8 @@ Sheriff is for repositories where AI agents open pull requests. One command sets
 - a smart model's plan on each task issue, before work starts ([Planning](#planning));
 - an AI review on every push: an optional cheap model first, and a smart model only if that passes;
 - a ruleset that blocks merging until the review passes, admins included;
-- task tracking with Issues and a Projects board, where each task's status follows its pull request and your deploys.
+- task tracking with Issues and a Projects board, where each task's status follows its pull request and your deploys,
+  and an agent claims a task before starting it so no two agents take the same one ([Picking work](#picking-work)).
 
 It is built entirely on GitHub (Actions, a GitHub App, rulesets, Issues, Projects), so it works with any agent tool,
 such as Claude Code, Codex or LobeHub, and with people.
@@ -41,7 +42,7 @@ gh sheriff install
 flowchart TB
     subgraph PLAN["Plan every task"]
         direction LR
-        I["Task issue opened"] --> P["Smart model writes the plan"] --> W["Agent works to the plan"]
+        I["Task issue opened"] --> P["Smart model writes the plan"] --> K["Agent claims the task"] --> W["Agent works to the plan"]
         W -->|"plan cannot work"| R["/sheriff replan"] --> P
     end
     subgraph REVIEW["Review every push"]
@@ -61,7 +62,8 @@ flowchart TB
 
 0. With planning on, Sheriff first posts a plan on the task issue ([Planning](#planning)). `Merge gate` waits for it,
    and the review checks the pull request against it.
-1. An agent pushes to a pull request.
+1. An agent picks a task from `ready` in `gh sheriff task status --json` and claims it with `gh sheriff task claim <ID>`,
+   so no other agent starts it ([Picking work](#picking-work)). It works to the plan and pushes to a pull request.
 2. If you set a cheap reviewer (`SHERIFF_FIRST_PASS`), it reviews the diff first. A problem fails the `Review` check
    and the agent pushes a fix. A clean docs-only change stops here.
 3. Otherwise the smart model reviews the same diff.
