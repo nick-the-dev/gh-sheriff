@@ -7,6 +7,8 @@ release is made.
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-11-25
+
 ### Added
 
 - **Claims.** `gh sheriff task claim <ID>` records who works on a task in a new `Claimed by` issue field before any
@@ -90,7 +92,8 @@ First versioned release. Sheriff is in beta: behaviour, settings and messages ca
   a person set is never changed.
 - Plans and reviews are written in plain language.
 
-[Unreleased]: https://github.com/nick-the-dev/gh-sheriff/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/nick-the-dev/gh-sheriff/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/nick-the-dev/gh-sheriff/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/nick-the-dev/gh-sheriff/compare/v1.0.2...v1.1.0
 [1.0.2]: https://github.com/nick-the-dev/gh-sheriff/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/nick-the-dev/gh-sheriff/compare/v1.0.0...v1.0.1
