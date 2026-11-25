@@ -109,8 +109,10 @@ gh sheriff install --repo owner/name
 gh sheriff doctor --repo owner/name
 ```
 
-`install` works for organisations and personal accounts and is safe to re-run: it adds what is missing, rewrites the
-`Sheriff` ruleset to the current rules and closes older install pull requests. It:
+`install` sets a repository up for the first time. It works for organisations and personal accounts and is safe to
+re-run: it adds what is missing, rewrites the `Sheriff` ruleset only when it differs from the current rules, closes older
+install pull requests and keeps the modes you chose. `install --dry-run` changes nothing and prints every change it would
+make. A repository that already has Sheriff takes new releases with [`gh sheriff update`](#updates). `install`:
 
 1. Creates two environments only the default branch can use: `sheriff` (the GitHub App key) and `sheriff-review`
    (the reviewer keys).
@@ -126,26 +128,46 @@ gh sheriff doctor --repo owner/name
    required checks are kept.
 6. Adds four issue fields to your account and a Projects board named `<repo> work`, or the existing board you name with
    `--project-name` (saved as `SHERIFF_PROJECT`), then turns work state on and sets `SHERIFF_WORK_STATE_SINCE` (skip
-   with `--no-work-state`).
+   with `--no-work-state`). Re-running `install` on an existing install never turns work state on; use
+   `gh sheriff update --work-state on`.
 
 ## Updates
 
 Sheriff is released as versions (`v1.0.0`, `v1.1.0`, ...), each an immutable tag with
 [release notes](https://github.com/nick-the-dev/gh-sheriff/releases), also kept in [CHANGELOG.md](CHANGELOG.md), that
 flag anything breaking. `v1` is a tag that always points at the latest `v1.x` release. While Sheriff is in beta, a
-breaking change can still ship within `v1`. A change that existing installs must run `gh sheriff install` again for, to
-keep working, ships as `v2`; a new feature that needs the new workflow file says so under **Upgrading** in its notes.
+breaking change can still ship within `v1`. A change that existing installs must run `gh sheriff update` for, to keep
+working, ships as `v2`; a new feature that needs the new workflow file says so under **Upgrading** in its notes.
+
+To take a release on a repository that already has Sheriff:
+
+```sh
+gh extension upgrade sheriff
+gh sheriff update --dry-run   # prints every change; nothing is written
+gh sheriff update
+```
+
+`update` opens the trigger-files pull request only when the templates changed, rewrites the `Sheriff` ruleset only when
+it differs, and, while work state is on, adds missing issue fields, board columns, views and open task issues, and sets a
+variable a release needs (such as `SHERIFF_WORK_STATE_SINCE`) when it is missing. It never touches secrets or keys,
+reviewer models, the plan, merge or updates modes, the board's own Status options or views, and it never turns a feature
+on or off. A second `update` changes nothing. On a repository without Sheriff it stops and points to `install`.
+
+Work state is an explicit choice on an existing repository: `gh sheriff update --work-state on [--project-name "<board>"]`
+turns it on with `SHERIFF_WORK_STATE_SINCE` set to now, so issues closed before it are never reopened, and reuses the
+board you name; `--work-state off` turns it off and keeps the fields, the board and every Stage. With `--dry-run`, turning
+it on also previews the first sync: how many tasks it would move, reopen and close.
 
 `gh sheriff install --updates` chooses how your repository takes releases. Running `install` without it keeps the current
-mode; in pinned mode it pins the release of your `gh sheriff`, so upgrading the CLI and running `install` moves the pin:
+mode; in pinned mode it pins the release of your `gh sheriff`, so upgrading the CLI and running `update` moves the pin:
 
 | Mode | Your `sheriff.yml` runs | Updates arrive |
 |---|---|---|
 | `auto` (the default) | `@v1` | At once, with every release |
 | `pinned` | `@v1.0.0`, the release your `gh sheriff` is | As a Dependabot pull request per release, which Sheriff reviews and you merge when ready. Dependabot waits out its cooldown first (3 days after a release by default; `cooldown: default-days: 0` in `.github/dependabot.yml` removes it). `install` adds `.github/dependabot.yml` for GitHub Actions if you have none; if you have one without a `github-actions` entry, it tells you to add one |
 
-`gh sheriff doctor` reports the mode, the release your workflow runs and the latest release. Update the CLI with
-`gh extension upgrade sheriff`; when `doctor` says the trigger files differ, run `gh sheriff install` again.
+`gh sheriff doctor` reports the mode, the release your workflow runs and the latest release, and recommends
+`gh sheriff update` for anything an existing install lacks.
 
 ## Planning
 
@@ -186,7 +208,7 @@ author, or the logins in `SHERIFF_DECIDERS`, with the question. A reply from an 
 logins on the labelled issue is the answer: Sheriff writes the next plan from it and removes the label once no
 question is left. Replies count against the plan budget like a replan. The review blocks a pull request that builds a
 plan whose question is still open, and your agents should skip labelled issues ([Picking work](#picking-work)). Workflow files from before 1.1.0 do
-not start on replies; run `gh sheriff install` again, or comment `/sheriff replan <your answer>`.
+not start on replies; run `gh sheriff update`, or comment `/sheriff replan <your answer>`.
 
 **Pictures.** Images attached to the issue or to a trusted comment (GitHub attachments only, at most 10, 5 MB each,
 PNG, JPEG, GIF or WebP) are downloaded for the planner, which looks at them; the plan says when one could not be read.
@@ -315,7 +337,8 @@ cost, and exits with an error when the share of tokens without cache reads is ab
 
 | Command | Description |
 |---|---|
-| `gh sheriff install` | Set up a repository. Flags: `--repo`, `--first-pass`, `--review-model`, `--plan on\|off`, `--merges serial\|bundle`, `--no-work-state`, `--project-name`, `--no-files`, `--no-browser`, `--new-key` (store a fresh App key), `--rotate-secrets` (replace reviewer keys), `--updates auto\|pinned`, `--yes` |
+| `gh sheriff install` | Set up a repository. Flags: `--repo`, `--first-pass`, `--review-model`, `--plan on\|off`, `--merges serial\|bundle`, `--no-work-state`, `--project-name`, `--no-files`, `--no-browser`, `--dry-run`, `--new-key` (store a fresh App key), `--rotate-secrets` (replace reviewer keys), `--updates auto\|pinned`, `--yes` |
+| `gh sheriff update` | Bring an existing install to this release, keeping every setting you chose. Flags: `--repo`, `--dry-run`, `--work-state on\|off`, `--project-name` |
 | `gh sheriff doctor` | Check the setup and print what to fix. Flags: `--repo`, `--no-work-state`, `--project-name` |
 | `gh sheriff models` | Choose the cheap and the smart reviewer. Flags: `--repo`, `--first-pass`, `--review-model`, `--rotate-secrets` |
 | `gh sheriff stats` | Show review and plan usage and cost. Flags: `--repo`, `--prs` (default 50), `--limit` (default 10) |
@@ -358,7 +381,7 @@ All settings are optional repository variables.
 | `SHERIFF_UNLOCK_AUTHORS` | none | Logins, besides admins and maintainers, who may grant an extra review (`/sheriff review`) or plan (`/sheriff plan`) |
 | `SHERIFF_DECIDERS` | the issue's author | People asked when a plan needs a decision, and who may answer it besides admins and maintainers ([Planning](#planning)); also whom `task ask` asks without `--to` |
 | `SHERIFF_PROJECT` | `<repo> work` | Title of the work board; `install --project-name` sets it |
-| `SHERIFF_WORK_STATE_SINCE` | set by `install` | Verified issues closed before this time (UTC) are not audited for evidence, so turning work state on never reopens old work. Without it, closed issues are not audited |
+| `SHERIFF_WORK_STATE_SINCE` | set when work state is turned on | Verified issues closed before this time (UTC) are not audited for evidence, so turning work state on never reopens old work. Without it, closed issues are not audited |
 | `SHERIFF_RUNS_ON` | `ubuntu-latest` | Runner label for the gate, reviews, plans and work state ([Runners and Actions minutes](#runners-and-actions-minutes)) |
 | `SHERIFF_SMART_SHARE_LIMIT` | `10` | Target smart-model share in percent for `gh sheriff stats` |
 | `SHERIFF_RELAY_RUNS_ON` | `ubuntu-latest` | Runner label for the relay |
@@ -423,7 +446,7 @@ Sheriff updates `Stage` on its own:
 Stages only move forward, with three exceptions: a Parked task moves to In progress when a pull request opens (merges
 don't advance it), abandoned work returns to Candidate (above), and Verified without recorded evidence moves back on the
 next sync, which reopens a closed issue. That audit covers open issues and issues closed after
-`SHERIFF_WORK_STATE_SINCE`, which `install` sets when it turns work state on, so history from before Sheriff tracked the
+`SHERIFF_WORK_STATE_SINCE`, which `install` or `update --work-state on` sets when it turns work state on, so history from before Sheriff tracked the
 work is left alone; `gh sheriff doctor` and `gh sheriff task sync` (a dry run) say how many tasks the next sync would set
 back. `task verify` works only from Released, and `task set` can't set Verified. `task verify` looks for the task's
 merge among recent pull requests and by searching for its ID; work with no merge (a setting changed by hand) records its

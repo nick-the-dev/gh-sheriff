@@ -9,8 +9,18 @@ release is made.
 
 ### Added
 
-- **Adopting work state is safe for existing history.** `install` sets `SHERIFF_WORK_STATE_SINCE` when it turns work
-  state on, and the evidence audit (Verified without recorded evidence moves back and the issue reopens) covers only open
+- **`gh sheriff update`** brings an existing install to the current release: it opens the trigger-files pull request only
+  when the templates changed, rewrites the `Sheriff` ruleset only when it differs, and, while work state is on, adds
+  missing issue fields, board columns, views and open task issues and fills in variables a release needs. It never
+  touches secrets, reviewer models, the plan, merge or updates modes, the board's own Status options or views, and
+  never turns a feature on or off. `--work-state on [--project-name "<board>"]` turns work state on with a fresh
+  `SHERIFF_WORK_STATE_SINCE`; `--work-state off` turns it off and keeps its data.
+- **`--dry-run`** on `install` and `update` writes nothing (any write is refused) and prints every change: variables
+  with old and new values, secret names, environments, the ruleset, the trigger-files pull request, issue fields, the
+  board (created or reused, columns, views, Status options, items), and, when work state would be on, a preview of the
+  first sync: how many tasks it would move, reopen and close.
+- **Adopting work state is safe for existing history.** `install` and `update --work-state on` set `SHERIFF_WORK_STATE_SINCE`
+  when they turn work state on, and the evidence audit (Verified without recorded evidence moves back and the issue reopens) covers only open
   issues and issues closed after it. `gh sheriff doctor` and a dry-run `gh sheriff task sync` say how many tasks the
   next sync would set back.
 - `SHERIFF_PROJECT` names the work board. `install --project-name` saves it, and `task new`, `task board-status`,
@@ -33,13 +43,17 @@ release is made.
 ### Changed
 
 - Without `SHERIFF_WORK_STATE_SINCE`, closed issues are no longer audited for Verified evidence; open issues still are.
+- Re-running `install` on an existing install no longer turns work state on; `gh sheriff update --work-state on` does.
+- `install` rewrites the `Sheriff` ruleset only when it differs from the current rules.
+- `gh sheriff doctor` and the work-state messages recommend `gh sheriff update` for what an existing install lacks.
 
 ### Upgrading
 
-- Run `gh sheriff install` to get the new `sheriff.yml`: its state job runs when an issue is opened or retitled and
-  passes `SHERIFF_HEALTH_URL`, `SHERIFF_PROJECT` and `SHERIFF_WORK_STATE_SINCE` to the sync. `install` also sets
-  `SHERIFF_WORK_STATE_SINCE` on a repository whose work state is already on, so closed issues are audited again from
-  then on. Until then the old file keeps working without those.
+- Run `gh extension upgrade sheriff`, then `gh sheriff update` (add `--dry-run` first to see every change). It opens a
+  pull request with the new `sheriff.yml`, whose state job runs when an issue is opened or retitled and passes
+  `SHERIFF_HEALTH_URL`, `SHERIFF_PROJECT` and `SHERIFF_WORK_STATE_SINCE` to the sync, and on a repository whose work
+  state is already on it sets `SHERIFF_WORK_STATE_SINCE`, so closed issues are audited again from then on. Until then
+  the old file keeps working without those.
 
 ## [1.2.0] - 2026-11-25
 

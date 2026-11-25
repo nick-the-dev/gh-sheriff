@@ -144,7 +144,7 @@ def schema():
 
 def require(known):
     if known["missing"]:
-        raise WorkError("the repository has no issue fields " + ", ".join(known["missing"]) + ": run gh sheriff install")
+        raise WorkError("the repository has no issue fields " + ", ".join(known["missing"]) + ": run gh sheriff update (gh sheriff install on a new repository)")
     return known
 
 
@@ -466,7 +466,7 @@ def abandoned(item, prs):
 def sync(apply, only=None, pages=PAGES):
     known = schema()
     if known["missing"]:
-        return {"skipped": "no issue fields " + ", ".join(known["missing"]) + " on this repository (gh sheriff install adds them)", "changes": []}
+        return {"skipped": "no issue fields " + ", ".join(known["missing"]) + " on this repository (gh sheriff update adds them)", "changes": []}
     if isinstance(known["remaining"], int) and known["remaining"] < RESERVE:
         return {"skipped": "only " + str(known["remaining"]) + " GraphQL points left this hour; a later run catches up", "changes": []}
     items = [item for item in issues("OPEN") + issues("CLOSED", pages)
@@ -487,7 +487,8 @@ def sync(apply, only=None, pages=PAGES):
                 target, why = "Candidate", "its pull requests were closed without merging"
         if not target:
             continue
-        changes.append(dict({"id": item["id"], "number": item["number"], "from": item["stage"], "to": target}, **({"why": why} if why else {})))
+        changes.append(dict({"id": item["id"], "number": item["number"], "open": item["open"], "from": item["stage"], "to": target},
+                            **({"why": why} if why else {})))
         if not apply:
             continue
         if not unchanged(item):
@@ -621,7 +622,7 @@ def mirror_status(issue_node, stage):
             if not state["field"]:
                 continue
             if stage not in state["options"]:
-                warn("the board's Status has no option named " + stage + ", so Status is not mirrored (gh sheriff install adds it)")
+                warn("the board's Status has no option named " + stage + ", so Status is not mirrored (gh sheriff update adds it)")
                 continue
             gql(SET_STATUS, {"project": state["project"], "item": entry["id"], "field": state["field"], "option": state["options"][stage]})
     except WorkError as error:
@@ -655,6 +656,14 @@ def board_status(title, apply):
                 gql(SET_STATUS, {"project": board, "item": entry_id, "field": state["field"], "option": state["options"][stage]})
     return {"board": node["title"], "items": total, "differ": len(rows), "by_stage": counts,
             "no_status_option": sorted(stage for stage in counts if stage not in state["options"]), "applied": bool(apply)}
+
+
+BOARD_ISSUES_QUERY = """query($id:ID!,$cursor:String){node(id:$id){... on ProjectV2{items(first:100,after:$cursor){
+ pageInfo{hasNextPage endCursor} nodes{content{... on Issue{id}}}}}}}"""
+
+
+def board_issues(board):
+    return {(entry.get("content") or {}).get("id") for entry in paged(BOARD_ISSUES_QUERY, {"id": board}, lambda data: data["node"]["items"], MAX_PAGES)[1]}
 
 
 def add_to_board(board, items):
@@ -712,7 +721,7 @@ def claimant(by):
 
 def claim_field(known):
     if not known["claim"]:
-        raise WorkError("the repository has no issue field " + CLAIM_FIELD + ": run gh sheriff install")
+        raise WorkError("the repository has no issue field " + CLAIM_FIELD + ": run gh sheriff update")
     return known["claim"]["id"]
 
 

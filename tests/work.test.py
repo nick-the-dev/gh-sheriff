@@ -347,7 +347,7 @@ class SyncTest(unittest.TestCase):
     def test_a_repository_without_the_fields_is_skipped_quietly(self):
         result, calls = self.run_sync([item()], {"A": [pr()]}, known=dict(KNOWN, missing=["Stage"]))
         self.assertEqual((calls, result["changes"]), ([], []))
-        self.assertIn("gh sheriff install", work.sync_text(result))
+        self.assertIn("gh sheriff update", work.sync_text(result))
 
 
 class EvidenceTest(unittest.TestCase):
@@ -663,7 +663,7 @@ class ClaimTest(unittest.TestCase):
         self.assertEqual(self.call(["claim", "A", "--by", "me"], item(is_open=False, reason="COMPLETED"))[:2], (1, []))
         code, writes, out = self.call(["claim", "A", "--by", "me"], known=dict(KNOWN, claim=None))
         self.assertEqual((code, writes), (1, []))
-        self.assertIn("no issue field Claimed by: run gh sheriff install", out["error"])
+        self.assertIn("no issue field Claimed by: run gh sheriff update", out["error"])
 
     def test_the_holder_releases_and_others_need_force(self):
         code, writes, out = self.call(["release", "A", "--by", "me"], item(claimed_by="me"))
