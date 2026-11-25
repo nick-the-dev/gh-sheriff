@@ -504,7 +504,7 @@ class StatusMirrorTests(unittest.TestCase):
         self.assertEqual((names, calls[1]), (["Todo", "In Progress", "Done", "Candidate", "In progress", "Merged", "Released", "Verified", "Parked"], ("backfill", True)))
 
     def test_a_board_with_its_own_status_options_is_not_rewritten(self):
-        calls, out = self.run_options(["Candidate", "Needs Nick"])
+        calls, out = self.run_options(["Candidate", "Needs human"])
         self.assertEqual((calls, "add In progress" in out), ([], True))
 
     def test_complete_options_change_nothing(self):

@@ -5,9 +5,10 @@ name: Sheriff
 # only to the steps that need them, by name. Comment, issue, relay and schedule triggers always run the default
 # branch's copy of this file, so a pull request cannot change what judges it. A deploy workflow refreshes the gate and
 # the work state when it ends: `gh workflow run sheriff.yml --ref <default branch> -f after_run=<its run id>`. With
-# SHERIFF_PLAN=on, a task issue opened by a trusted author, or a `/sheriff plan` or `/sheriff replan <reason>` comment,
-# starts the plan jobs: plan-reserve and plan-post write as the gate App in `sheriff`, and plan runs the model
-# read-only in `sheriff-review`.
+# SHERIFF_PLAN=on, a task issue opened by a trusted author, a `/sheriff plan` or `/sheriff replan <reason>` comment, or a
+# person's reply on an issue labelled sheriff:needs-decision (the answer to the plan's open question) starts the plan
+# jobs: plan-reserve and plan-post write as the gate App in `sheriff`, and plan runs the model read-only in
+# `sheriff-review`.
 on:
   issue_comment: # zizmor: ignore[dangerous-triggers] runs the default branch's copy; no pull request code runs
     types: [created, edited, deleted]
@@ -227,7 +228,8 @@ jobs:
       vars.SHERIFF_PLAN == 'on' && !github.event.issue.pull_request &&
       ((github.event_name == 'issues' && github.event.action == 'opened') ||
       (github.event_name == 'issue_comment' && github.event.action == 'created' &&
-      (startsWith(github.event.comment.body, '/sheriff plan') || startsWith(github.event.comment.body, '/sheriff replan'))) ||
+      (startsWith(github.event.comment.body, '/sheriff plan') || startsWith(github.event.comment.body, '/sheriff replan') ||
+      (github.event.comment.user.type != 'Bot' && contains(github.event.issue.labels.*.name, 'sheriff:needs-decision')))) ||
       (github.event_name == 'workflow_dispatch' && inputs.plan_issue != ''))
     concurrency:
       group: sheriff-plan-${{ github.event.issue.number || inputs.plan_issue }}
@@ -254,6 +256,7 @@ jobs:
           rounds: ${{ vars.SHERIFF_PLAN_ROUNDS || '3' }}
           ack-authors: ${{ vars.SHERIFF_ACK_AUTHORS }}
           unlock-authors: ${{ vars.SHERIFF_UNLOCK_AUTHORS }}
+          deciders: ${{ vars.SHERIFF_DECIDERS }}
           app-id: ${{ secrets.SHERIFF_APP_ID }}
           app-key: ${{ secrets.SHERIFF_APP_KEY_B64 }}
 
@@ -317,5 +320,6 @@ jobs:
           rounds: ${{ vars.SHERIFF_PLAN_ROUNDS || '3' }}
           ack-authors: ${{ vars.SHERIFF_ACK_AUTHORS }}
           unlock-authors: ${{ vars.SHERIFF_UNLOCK_AUTHORS }}
+          deciders: ${{ vars.SHERIFF_DECIDERS }}
           app-id: ${{ secrets.SHERIFF_APP_ID }}
           app-key: ${{ secrets.SHERIFF_APP_KEY_B64 }}

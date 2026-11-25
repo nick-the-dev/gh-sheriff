@@ -28,9 +28,19 @@ def planned(v, at="2026-11-22T10:00:00Z", superseded=None, editor=None):
     return note(APP + "[bot]", body, at, True, editor, 100 + v)
 
 
-def task(comments=(), title="LOGIN-FIX: fix login", author="boss", bot=False, open=True, decision=False):
+def task(comments=(), title="LOGIN-FIX: fix login", author="boss", bot=False, open=True, decision=False, labels=()):
     return {"number": 12, "title": title, "body": "", "open": open, "author": author, "author_bot": bot,
-            "decision": decision, "comments": list(comments)}
+            "decision": decision, "labels": list(labels), "comments": list(comments)}
+
+
+def asking(v, question="Pick A or B?", at="2026-11-22T10:00:00Z"):
+    body = ("<!-- sheriff-plan v=" + str(v) + " base=" + BASE + " -->\n**Sheriff plan v" + str(v) + "**\n## Priority\nP2: x\n## Decision needed\n"
+            + question + "\n## Problem\nx")
+    return note(APP + "[bot]", body, at, True, None, 100 + v)
+
+
+def asked(v, at="2026-11-22T10:05:00Z"):
+    return note(APP + "[bot]", "<!-- sheriff-decision v=" + str(v) + " -->\n@boss Sheriff plan v" + str(v) + " needs your decision", at, True, None, 200 + v)
 
 
 def gql_page(nodes, more=False, **issue):
@@ -168,8 +178,8 @@ class FactsTests(unittest.TestCase):
 ROLES = {"boss": "maintain", "chief": "admin"}
 
 
-def decide(issue, rounds=3, opened=True):
-    return plan.decide(issue, APP, lambda login: ROLES.get(login, "write"), ("helper",), ("friend",), rounds, NOW, opened)
+def decide(issue, rounds=3, opened=True, deciders=()):
+    return plan.decide(issue, APP, lambda login: ROLES.get(login, "write"), ("helper",), ("friend",), rounds, NOW, opened, deciders)
 
 
 class DecideTests(unittest.TestCase):
@@ -419,7 +429,7 @@ def reservation(v, id=55):
 
 class CommentTests(unittest.TestCase):
     RECORD = {"issue": 12, "version": 2, "base": BASE, "provider": "claude", "model": "claude-opus-5-5", "ok": True,
-              "text": "\n".join("## " + s + ("\nP2: normal" if s == "Priority" else "\nx") for s in plan.SECTIONS), "usage": {"input": 1}, "requester": "lane[bot]"}
+              "text": "\n".join("## " + s + ("\nP2: normal" if s == "Priority" else "\nNone." if s == "Decision needed" else "\nx") for s in plan.SECTIONS), "usage": {"input": 1}, "requester": "lane[bot]"}
 
     def test_priority_is_read_from_the_first_line_of_its_section(self):
         for text, expected in (("## Priority\nP1: blocks the deploy\n## Problem\nx", "P1"), ("## Priority\n\n**P0** — outage", "P0"),
@@ -563,7 +573,7 @@ class RunTests(StepTests):
     def test_a_model_error_or_bad_web_setting_is_a_failure_record(self):
         self.assertIn("ended without a result", self.run_plan(error=plan.reviewers.ReviewerError("boom"))["failure"])
         self.assertFalse(self.run_plan(text=CommentTests.RECORD["text"], web="all")["ok"])
-        self.assertEqual(self.run_plan(text="## Problem\nonly")["failure"], "missing sections: Priority, Solution space, Chosen approach, Tests, Production check, Out of scope")
+        self.assertEqual(self.run_plan(text="## Problem\nonly")["failure"], "missing sections: Priority, Decision needed, Solution space, Chosen approach, Tests, Production check, Out of scope")
 
     def test_web_tools_reach_only_a_claude_planner_and_the_prompt_is_the_static_file(self):
         self.run_plan(text=CommentTests.RECORD["text"], model="claude:claude-opus-5-5", web="any")
@@ -746,6 +756,229 @@ class PromptTests(unittest.TestCase):
         self.assertIn("Options that solve more than asked are rejected for that reason", text)
         for name in ("plan/issue.json", "plan/request.json", "plan/previous.md", "base/"):
             self.assertIn(name, text)
+
+
+
+PNG = b"\x89PNG\r\n\x1a\n" + b"p" * 8
+JPG = b"\xff\xd8\xff" + b"j" * 8
+HOST = "https://private-user-images.githubusercontent.com/"
+
+
+class DecisionTests(unittest.TestCase):
+    def test_the_decision_is_read_from_its_section_and_none_means_no_decision(self):
+        for text, expected in (("## Decision needed\nNone.\n## Problem\nx", ""), ("## Decision needed\n**None.**", ""), ("## Decision needed\n- none", ""),
+                               ("## Decision needed\nNone: the issue settles it.\n## Problem\nx", ""), ("## Decision needed\n\n## Problem\nx", ""),
+                               ("## Problem\nx", ""), ("## Decision needed\nPick A or B?\n- A: x\n## Problem\ny", "Pick A or B?\n- A: x"),
+                               ("## Decision needed\nNonetheless, pick A or B?", "Nonetheless, pick A or B?")):
+            with self.subTest(text=text):
+                self.assertEqual(plan.decision_of(text), expected)
+
+    def test_a_maintainers_reply_after_the_question_writes_the_next_version_with_the_answer(self):
+        result = decide(task([asking(1), asked(1), note("boss", "Go with A, keep the strip.", "2026-11-22T11:00:00Z", id=7)]))
+        self.assertEqual((result["action"], result["version"], result["requester"]), ("plan", 2, "boss"))
+        self.assertEqual(result["reason"], "answer to the open decision from @boss: Go with A, keep the strip.")
+
+    def test_only_a_person_who_maintains_or_is_a_listed_decider_answers(self):
+        open_question = [asking(1), asked(1)]
+        for author, bot, deciders, action in (("stranger", False, (), "skip"), ("helper", False, (), "skip"), ("lane[bot]", True, (), "skip"),
+                                              ("chief", False, (), "plan"), ("lane[bot]", True, ("lane[bot]",), "skip"), ("pm", False, ("pm",), "plan")):
+            with self.subTest(author=author, deciders=deciders):
+                comments = open_question + [note(author, "A", "2026-11-22T11:00:00Z", bot=bot)]
+                self.assertEqual(decide(task(comments), deciders=deciders)["action"], action)
+
+    def test_a_reply_before_the_question_or_to_a_plan_without_one_starts_nothing(self):
+        early = [asking(1), note("boss", "A", "2026-11-22T10:01:00Z"), asked(1, "2026-11-22T10:05:00Z")]
+        self.assertEqual(decide(task(early))["why"], "already planned")
+        self.assertEqual(decide(task([planned(1), note("boss", "looks good", "2026-11-22T11:00:00Z")]))["why"], "already planned")
+        self.assertEqual(decide(task([asking(1, "None."), asked(1), note("boss", "A", "2026-11-22T11:00:00Z")]))["why"], "already planned")
+        self.assertEqual(decide(task([asking(1), asked(1), note("boss", "/sheriff plan", "2026-11-22T11:00:00Z")]))["why"], "already planned")
+
+    def test_without_the_question_comment_the_plan_itself_opens_the_answers(self):
+        self.assertEqual(decide(task([asking(1), note("boss", "A", "2026-11-22T11:00:00Z")]))["action"], "plan")
+
+    def test_a_replan_command_wins_over_an_answer(self):
+        result = decide(task([asking(1), asked(1), note("boss", "A", "2026-11-22T11:00:00Z"), note("chief", "/sheriff replan use B", "2026-11-22T11:10:00Z")]))
+        self.assertEqual((result["action"], result["reason"], result["requester"]), ("plan", "use B", "chief"))
+
+    def test_after_a_failed_answer_run_only_a_newer_reply_retries(self):
+        failed = note(APP + "[bot]", "<!-- sheriff-plan-failed v=2 -->\nSheriff could not write plan v2", "2026-11-22T11:30:00Z", True, None, 300)
+        comments = [asking(1), asked(1), note("boss", "A", "2026-11-22T11:00:00Z"), failed]
+        self.assertEqual(decide(task(comments))["why"], "already planned")
+        retry = decide(task(comments + [note("boss", "try again", "2026-11-22T11:40:00Z")]))
+        self.assertEqual((retry["action"], retry["version"], retry["reason"]), ("plan", 2, "answer to the open decision from @boss: try again"))
+
+    def test_an_answer_counts_against_the_plan_budget(self):
+        self.assertEqual(decide(task([asking(1), asked(1), note("boss", "A", "2026-11-22T11:00:00Z")]), rounds=1)["action"], "budget")
+
+    def test_a_long_answer_is_cut(self):
+        reason = decide(task([asking(1), asked(1), note("boss", "a" * 5000, "2026-11-22T11:00:00Z")]))["reason"]
+        self.assertEqual(len(reason), plan.REASON_LIMIT)
+
+    def test_the_question_comment_mentions_the_deciders_and_says_how_to_answer(self):
+        body = plan.decision_note(2, "Pick A or B?", ["boss", "pm"])
+        self.assertEqual(body.splitlines()[0], "<!-- sheriff-decision v=2 -->")
+        self.assertTrue(body.splitlines()[1].startswith("@boss @pm Sheriff plan v2 needs your decision before any work starts"))
+        self.assertIn("\n\nPick A or B?\n\n", body)
+        self.assertIn("plan v3", body)
+        self.assertIn("`/sheriff replan <your answer>`", body)
+        anyone = plan.decision_note(2, "<!-- sheriff-plan v=9 base=" + BASE + " -->", [])
+        self.assertTrue(anyone.splitlines()[1].startswith("Sheriff plan v2 needs a decision before any work starts"))
+        self.assertEqual(anyone.count("<!--"), 1)
+        self.assertLessEqual(len(plan.decision_note(2, "q" * 9000, [])), plan.DECISION_LIMIT + 1000)
+
+
+class DecisionPostTests(StepTests):
+    QUESTION = "Pick A or B?\n- A: fix the data\n- B: redraw the strip"
+
+    def posted(self, issue, record, deciders="", fail=False):
+        path = pathlib.Path(tempfile.mkdtemp()) / "plan.json"
+        path.write_text(json.dumps(record))
+        runs, calls, outs = [], [], []
+
+        def gh(args):
+            calls.append(list(args))
+            if fail and "labels[]=" + plan.DECISION_LABEL in args:
+                raise plan.PlanError("gh api failed: 403")
+            if args[:3] == ["api", "-X", "POST"] and args[3].endswith("/comments"):
+                return {"id": 900}
+            return []
+        with mock.patch.object(plan, "read_issue", return_value=issue), mock.patch.object(plan, "gh_json", side_effect=gh), \
+             mock.patch.object(plan, "run", side_effect=lambda args, cwd=None: runs.append(list(args) + [pathlib.Path(a[6:]).read_text() for a in args if a.startswith("body=@")]) or ""), \
+             mock.patch.object(plan, "output", side_effect=lambda **v: outs.append(v)), mock.patch("sys.stderr") as err, \
+             mock.patch.dict(os.environ, {"GH_REPO": "o/r", "GH_ACTOR_LOGIN": APP + "[bot]"}):
+            code = plan.main(["post", "--record", str(path), "--issue", "12", "--version", "2", "--comment-id", "55", "--deciders", deciders])
+        self.assertEqual((code, outs[-1]["posted"]), (0, "true"))
+        notes = [c[c.index("-f") + 1][5:] for c in calls if c[:3] == ["api", "-X", "POST"] and c[3].endswith("/comments")]
+        return runs, calls, notes, "".join(c.args[0] for c in err.write.call_args_list)
+
+    def record(self, question):
+        return dict(CommentTests.RECORD, text=CommentTests.RECORD["text"].replace("## Decision needed\nNone.", "## Decision needed\n" + question))
+
+    def test_an_open_decision_labels_the_issue_and_asks_the_author(self):
+        runs, calls, notes, _ = self.posted(task([planned(1), reservation(2)]), self.record(self.QUESTION))
+        self.assertIn(["gh", "label", "create", plan.DECISION_LABEL], [r[:4] for r in runs])
+        self.assertIn(["api", "-X", "POST", "repos/{owner}/{repo}/issues/12/labels", "-f", "labels[]=" + plan.DECISION_LABEL], calls)
+        self.assertEqual(len(notes), 1)
+        self.assertTrue(notes[0].startswith("<!-- sheriff-decision v=2 -->\n@boss "))
+        self.assertIn(self.QUESTION, notes[0])
+
+    def test_listed_deciders_are_asked_instead_of_the_author_and_a_bots_issue_without_them_asks_no_one(self):
+        _, _, notes, _ = self.posted(task([planned(1), reservation(2)]), self.record(self.QUESTION), deciders="pm, lead")
+        self.assertTrue(notes[0].splitlines()[1].startswith("@pm @lead "))
+        _, _, notes, _ = self.posted(task([planned(1), reservation(2)], author="lane[bot]", bot=True), self.record(self.QUESTION))
+        self.assertTrue(notes[0].splitlines()[1].startswith("Sheriff plan v2 needs a decision"))
+
+    def test_a_settled_plan_removes_the_label_and_asks_nothing(self):
+        runs, calls, notes, _ = self.posted(task([planned(1), reservation(2)], labels=[plan.DECISION_LABEL]), CommentTests.RECORD)
+        self.assertEqual(notes, [])
+        self.assertIn(["api", "-X", "DELETE", "repos/{owner}/{repo}/issues/12/labels/sheriff%3Aneeds-decision"], calls)
+        runs, calls, notes, _ = self.posted(task([planned(1), reservation(2)]), CommentTests.RECORD)
+        self.assertFalse(any("DELETE" in c for c in calls))
+
+    def test_a_settling_plan_closes_the_earlier_question_and_its_superseded_plan_says_so(self):
+        runs, _, notes, _ = self.posted(task([asking(1), asked(1), note("boss", "A", "2026-11-22T11:00:00Z"), reservation(2)]), dict(CommentTests.RECORD, requester="boss"))
+        edits = {r[4].rsplit("/", 1)[1]: r[-1] for r in runs if r[:4] == ["gh", "api", "-X", "PATCH"]}
+        self.assertEqual(notes, [])
+        self.assertTrue(edits["201"].startswith("<!-- sheriff-decision v=1 closed-by=2 -->\n**Answered.** Plan v2 follows the answer from boss"))
+        self.assertIn("Pick A or B?", edits["201"].split("<details>", 1)[1])
+        self.assertNotIn("@boss", edits["201"])
+        self.assertEqual(edits["101"].splitlines()[1], "**Superseded by v2.** Its question is closed: v2 holds the current answer.")
+
+    def test_a_plan_that_asks_again_marks_the_earlier_question_replaced(self):
+        runs, _, notes, _ = self.posted(task([asking(1), asked(1), reservation(2)]), self.record(self.QUESTION))
+        edits = {r[4].rsplit("/", 1)[1]: r[-1] for r in runs if r[:4] == ["gh", "api", "-X", "PATCH"]}
+        self.assertTrue(edits["201"].startswith("<!-- sheriff-decision v=1 closed-by=2 -->\n**Replaced.** Plan v2 asks the question again"))
+        self.assertEqual(len(notes), 1)
+
+    def test_a_closed_question_is_left_alone(self):
+        closed = note(APP + "[bot]", "<!-- sheriff-decision v=1 closed-by=2 -->\n**Answered.**", "2026-11-22T10:06:00Z", True, None, 201)
+        runs, _, _, _ = self.posted(task([asking(1), closed, reservation(2)]), CommentTests.RECORD)
+        self.assertNotIn("201", [r[4].rsplit("/", 1)[1] for r in runs if r[:4] == ["gh", "api", "-X", "PATCH"]])
+
+    def test_a_failed_label_or_question_write_still_posts_the_plan_with_a_warning(self):
+        _, _, notes, err = self.posted(task([planned(1), reservation(2)]), self.record(self.QUESTION), fail=True)
+        self.assertIn("decision of issue 12", err)
+        self.assertEqual(len(notes), 1)
+
+
+class ImageTests(StepTests):
+    def test_only_https_github_attachment_images_are_taken_once_each(self):
+        html = ('<p><img src="' + HOST + '1/a.png?jwt=x&amp;v=1" alt="s"> <img src="https://github.com/user-attachments/assets/u-1">'
+                '<img src="https://evil.example/x.png"> <img src="http://private-user-images.githubusercontent.com/2.png">'
+                '<img src="data:image/png;base64,AA"> <img src="https://github.com/o/r/raw/main/x.png"> <img src="' + HOST + '1/a.png?jwt=x&amp;v=1"></p>')
+        self.assertEqual(plan.image_urls(html), [HOST + "1/a.png?jwt=x&v=1", "https://github.com/user-attachments/assets/u-1"])
+        self.assertEqual(plan.image_urls(""), [])
+
+    def test_images_are_saved_by_their_type_and_unreadable_ones_are_counted(self):
+        fetched = {HOST + "a": PNG, HOST + "b": JPG, HOST + "c": b"<html>", HOST + "d": OSError("timed out")}
+
+        def fetch(url):
+            value = fetched[url]
+            if isinstance(value, Exception):
+                raise value
+            return value
+        out = self.out_dir()
+        sources = [("the issue", '<img src="' + HOST + 'a"><img src="' + HOST + 'b">'), ("a comment by boss", '<img src="' + HOST + 'c"><img src="' + HOST + 'd">')]
+        images, unread = plan.save_images(sources, out, fetch)
+        self.assertEqual(images, [{"file": "plan/images/1.png", "from": "the issue"}, {"file": "plan/images/2.jpg", "from": "the issue"}])
+        self.assertEqual(unread, 2)
+        self.assertEqual((out / "images/1.png").read_bytes(), PNG)
+
+    def test_the_count_and_size_limits_hold(self):
+        out = self.out_dir()
+        sources = [("the issue", "".join('<img src="' + HOST + str(n) + '">' for n in range(3)))]
+        with mock.patch.object(plan, "IMAGES_MAX", 2):
+            images, unread = plan.save_images(sources, out, lambda url: PNG)
+        self.assertEqual((len(images), unread), (2, 1))
+        with mock.patch.object(plan, "IMAGE_BYTES", 10):
+            images, unread = plan.save_images(sources, self.out_dir(), lambda url: PNG)
+        self.assertEqual((images, unread), ([], 3))
+
+    def test_images_of_the_issue_and_trusted_comments_reach_the_planner(self):
+        issue = task([note("writer", "w", "2026-11-22T11:00:00Z", id=5), note("stranger", "s", "2026-11-22T11:01:00Z", id=6), reservation(2)])
+        with mock.patch.object(plan, "issue_html", return_value=[("the issue", '<img src="' + HOST + 'a">')]) as html, \
+             mock.patch.object(plan, "fetch_image", return_value=PNG):
+            out = self.prepare(issue, request={"version": 2, "reason": "", "requester": ""}, ack=("writer",))
+        written = json.loads((out / "issue.json").read_text())
+        self.assertEqual(written["images"], [{"file": "plan/images/1.png", "from": "the issue"}])
+        self.assertNotIn("images_note", written)
+        self.assertEqual(html.call_args.args, (12, {5}))
+        self.assertEqual((out / "images/1.png").read_bytes(), PNG)
+
+    def test_an_image_read_failure_leaves_a_note_and_still_plans(self):
+        with mock.patch.object(plan, "issue_html", side_effect=plan.PlanError("gh api failed: 502")):
+            out = self.prepare(task([reservation(2)]), request={"version": 2, "reason": "", "requester": ""})
+        written = json.loads((out / "issue.json").read_text())
+        self.assertEqual(written["images"], [])
+        self.assertEqual(written["images_note"], "the attached images could not be read")
+        self.assertEqual(self.outs[-1]["skip"], "")
+
+    def test_the_issue_html_comes_from_rest_with_trusted_comments_only(self):
+        def gh(args):
+            if args[-1].endswith("/comments?per_page=100"):
+                return [[{"id": 5, "user": {"login": "writer"}, "body_html": "<img w>"}, {"id": 6, "user": {"login": "stranger"}, "body_html": "<img s>"}]]
+            return {"body_html": "<img i>"}
+        with mock.patch.object(plan, "gh_json", side_effect=gh) as called:
+            sources = plan.issue_html(12, {5})
+        self.assertEqual(sources, [("the issue", "<img i>"), ("a comment by writer", "<img w>")])
+        self.assertIn("Accept: application/vnd.github.html+json", called.call_args_list[0].args[0])
+
+
+class PromptRuleTests(unittest.TestCase):
+    def test_the_plan_prompt_asks_the_decision_first_shows_images_and_never_guesses_gender(self):
+        text = (ROOT / "prompts/plan.md").read_text()
+        flat = " ".join(text.split())
+        self.assertLess(text.index("## Priority"), text.index("## Decision needed"))
+        self.assertLess(text.index("## Decision needed"), text.index("## Problem"))
+        self.assertIn("`None.`", text)
+        self.assertIn("plan/images/", text)
+        self.assertIn("Never guess anyone's gender", flat)
+        self.assertIn("Do not @mention anyone", flat)
+
+    def test_the_review_prompt_blocks_work_on_an_open_decision_and_never_guesses_gender(self):
+        flat = " ".join((ROOT / "prompts/review.md").read_text().split())
+        self.assertIn("Decision needed", flat)
+        self.assertIn("Never guess anyone's gender", flat)
 
 
 if __name__ == "__main__":

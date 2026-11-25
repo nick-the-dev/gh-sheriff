@@ -127,9 +127,10 @@ gh sheriff doctor --repo owner/name
 ## Updates
 
 Sheriff is released as versions (`v1.0.0`, `v1.1.0`, ...), each an immutable tag with
-[release notes](https://github.com/nick-the-dev/gh-sheriff/releases) that flag anything breaking. `v1` is a tag that
-always points at the latest `v1.x` release. While Sheriff is in beta, a breaking change can still ship within `v1`;
-a change that needs `gh sheriff install` to run again ships as `v2`.
+[release notes](https://github.com/nick-the-dev/gh-sheriff/releases), also kept in [CHANGELOG.md](CHANGELOG.md), that
+flag anything breaking. `v1` is a tag that always points at the latest `v1.x` release. While Sheriff is in beta, a
+breaking change can still ship within `v1`. A change that existing installs must run `gh sheriff install` again for, to
+keep working, ships as `v2`; a new feature that needs the new workflow file says so under **Upgrading** in its notes.
 
 `gh sheriff install --updates` chooses how your repository takes releases. Running `install` without it keeps the current
 mode; in pinned mode it pins the release of your `gh sheriff`, so upgrading the CLI and running `install` moves the pin:
@@ -145,9 +146,10 @@ mode; in pinned mode it pins the release of your `gh sheriff`, so upgrading the 
 ## Planning
 
 With `SHERIFF_PLAN=on`, a smart model writes a plan on each task issue before work starts. The plan is a comment from
-Sheriff's App with seven sections:
+Sheriff's App with eight sections:
 
 - **Priority**: how urgent the task is, with one sentence why (scale below).
+- **Decision needed**: `None.`, or the question a person must answer before work starts ([Planning](#planning)).
 - **Problem**: what is wrong or missing, and why it matters.
 - **Solution space**: the options, with web research where it changes the answer, and why the others were rejected.
 - **Chosen approach**: the design, the files to change, edge cases and risks. It is the minimal readable change: the
@@ -172,6 +174,18 @@ on first use.
 
 Change the label to override. Sheriff never changes or removes a priority label a person set; a replan re-judges only
 Sheriff's own label. Your agents can pick work by these labels.
+
+**Decisions.** When the issue asks for approval or a choice before building, or only someone responsible for the
+project can decide, the plan's second section holds the question: one line per option and the planner's
+recommendation. Sheriff then labels the issue `sheriff:needs-decision` and posts a comment that @mentions the issue's
+author, or the logins in `SHERIFF_DECIDERS`, with the question. A reply from an admin, a maintainer or one of those
+logins on the labelled issue is the answer: Sheriff writes the next plan from it and removes the label once no
+question is left. Replies count against the plan budget like a replan. The review blocks a pull request that builds a
+plan whose question is still open, and your agents should skip labelled issues. Workflow files from before 1.1.0 do
+not start on replies; run `gh sheriff install` again, or comment `/sheriff replan <your answer>`.
+
+**Pictures.** Images attached to the issue or to a trusted comment (GitHub attachments only, at most 10, 5 MB each,
+PNG, JPEG, GIF or WebP) are downloaded for the planner, which looks at them; the plan says when one could not be read.
 
 **Which issues.** Only task issues, whose title starts with a task ID (`<ID>: ...` or `<ID> #n: ...`; task tracking
 reads only the first form); never Decision issues or pull requests. An issue a person opens without an ID is renamed first, when it would be planned:
@@ -333,6 +347,7 @@ All settings are optional repository variables.
 | `SHERIFF_BUNDLE_MAX` | `5` | Merged pull requests one deploy may carry in bundle mode; anything but a whole number of at least 1 means 5 |
 | `SHERIFF_ACK_AUTHORS` | none | Logins, besides bots, that count as agents when replying to comments and as trusted authors for planning |
 | `SHERIFF_UNLOCK_AUTHORS` | none | Logins, besides admins and maintainers, who may grant an extra review (`/sheriff review`) or plan (`/sheriff plan`) |
+| `SHERIFF_DECIDERS` | the issue's author | People asked when a plan needs a decision, and who may answer it besides admins and maintainers ([Planning](#planning)) |
 | `SHERIFF_RUNS_ON` | `ubuntu-latest` | Runner label for the gate, reviews, plans and work state ([Runners and Actions minutes](#runners-and-actions-minutes)) |
 | `SHERIFF_SMART_SHARE_LIMIT` | `10` | Target smart-model share in percent for `gh sheriff stats` |
 | `SHERIFF_RELAY_RUNS_ON` | `ubuntu-latest` | Runner label for the relay |
@@ -451,11 +466,8 @@ Sheriff is standard-library Python and `gh`.
 | `scripts/` | The logic |
 | `templates/` | The two files `install` adds to a repository |
 
-Releasing: set `VERSION` in `gh-sheriff`, commit to `main`, then
-`gh release create vX.Y.Z --target main --notes-file NOTES.md` and move `v1` to the same commit
-(`git tag -f v1 vX.Y.Z && git push -f origin v1`). The `v*` tags are protected; only admins can move `v1`. A new
-permission asked for only by jobs or inputs that a new template adds ships in `v1`, because old templates never run
-those jobs; a changed permission on a job an old template already runs ships as `v2`.
+Every change is listed in [CHANGELOG.md](CHANGELOG.md); [RELEASING.md](RELEASING.md) has the release steps and how to
+pick the version.
 
 Issues and pull requests are welcome.
 

@@ -16,6 +16,10 @@ inputs:
     description: Logins besides maintainers and admins whose /sheriff plan comment allows one more plan after the budget
     required: false
     default: ""
+  deciders:
+    description: People, besides maintainers and admins, who answer a plan's open decision with a reply, comma-separated
+    required: false
+    default: ""
   app-id:
     description: The Sheriff gate App id
     required: true
@@ -52,6 +56,7 @@ runs:
         ROUNDS: ${{ inputs.rounds }}
         SHERIFF_ACK_AUTHORS: ${{ inputs.ack-authors }}
         UNLOCKERS: ${{ inputs.unlock-authors }}
+        DECIDERS: ${{ inputs.deciders }}
         EVENT_ACTION: ${{ github.event.action }}
         SHERIFF: ${{ github.action_path }}/../..
       run: |
@@ -62,4 +67,4 @@ runs:
         fi
         python3 -I "$SHERIFF/scripts/app-token.py" --repo "$GH_REPO" --permission issues=write --permission contents=read -- \
           python3 -I "$SHERIFF/scripts/plan.py" reserve --issue "$ISSUE" --rounds "$ROUNDS" --ack-authors "$SHERIFF_ACK_AUTHORS" \
-          --unlock-authors "$UNLOCKERS" --event "$EVENT_ACTION"
+          --unlock-authors "$UNLOCKERS" --event "$EVENT_ACTION" --deciders "$DECIDERS"

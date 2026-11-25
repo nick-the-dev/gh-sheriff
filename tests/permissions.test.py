@@ -120,6 +120,19 @@ class PlanWiringTests(unittest.TestCase):
             self.assertIn(part, condition)
         self.assertIn("  issues:\n    types: [opened]\n", TEMPLATE)
 
+    def test_a_persons_reply_on_an_issue_waiting_for_a_decision_starts_planning(self):
+        condition = block(TEMPLATE, "plan-reserve")
+        self.assertIn("(github.event.comment.user.type != 'Bot' && contains(github.event.issue.labels.*.name, 'sheriff:needs-decision'))", condition)
+        self.assertIn('DECISION_LABEL = "sheriff:needs-decision"', (ROOT / "scripts/plan.py").read_text())
+
+    def test_the_deciders_reach_the_reserve_the_post_and_the_recheck(self):
+        for job in ("plan-reserve", "plan-post"):
+            self.assertIn("deciders: ${{ vars.SHERIFF_DECIDERS }}", block(TEMPLATE, job))
+        reserve = (ROOT / "actions/plan-reserve/action.yml").read_text()
+        post = (ROOT / "actions/plan-post/action.yml").read_text()
+        self.assertIn('--deciders "$DECIDERS"', reserve)
+        self.assertEqual(post.count('--deciders "$DECIDERS"'), 2)
+
     def test_issue_events_start_neither_the_gate_nor_the_work_state(self):
         for job in ("gate", "state"):
             self.assertIn("github.event_name != 'issues'", block(TEMPLATE, job))
