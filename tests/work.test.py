@@ -404,6 +404,7 @@ class ItemTest(unittest.TestCase):
         self.assertEqual(made["blocked_by"], [{"number": 7, "open": False, "title": "Old work"}])
         self.assertEqual((made["claimed_by"], made["needs_decision"]), ("agent-7", False))
         self.assertTrue(work.to_item(self.node(labels=("sheriff:needs-decision",)))["needs_decision"])
+        self.assertEqual(work.to_item(self.node(labels=("priority:P1", "agent:t3")))["labels"], ["agent:t3", "priority:P1"])
 
     def test_issue_without_a_task_prefix_has_no_id(self):
         self.assertIsNone(work.to_item(self.node("Add build step to CI"))["id"])

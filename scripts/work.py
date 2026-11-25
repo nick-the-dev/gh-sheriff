@@ -195,7 +195,7 @@ def to_item(node):
     return {"id": match.group(1) if match else None, "node": node["id"], "number": node["number"],
             "title": title[len(match.group(0)):] if match else title, "open": node.get("state") == "OPEN",
             "reason": node.get("stateReason"), "url": node.get("url"), "created": node.get("createdAt") or "",
-            "updated": node.get("updatedAt") or "", "closed": node.get("closedAt"), "type": kind,
+            "updated": node.get("updatedAt") or "", "closed": node.get("closedAt"), "type": kind, "labels": sorted(filter(None, labels)),
             "priority": next((level for level in PRIORITIES if "priority:" + level in labels), None),
             "decision": kind == "Decision" or DECISION_LABEL in labels, "needs_decision": NEEDS_DECISION_LABEL in labels,
             "asked": ASK_LABEL in labels, "stage": values.get(FIELDS["stage"]), "verify": values.get(FIELDS["verify"]),
