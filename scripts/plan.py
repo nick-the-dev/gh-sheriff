@@ -8,6 +8,7 @@ data, the read-only model run, and the post that turns the reservation into the 
 old version superseded."""
 import argparse
 import datetime
+import html.parser
 import importlib.util
 import json
 import os
@@ -16,7 +17,9 @@ import re
 import subprocess
 import sys
 import tempfile
+import urllib.error
 import urllib.parse
+import urllib.request
 
 ID = r"[A-Z][A-Z0-9-]+"
 TASK_TITLE = re.compile(r"^(" + ID + r")(?: #\d+)?: ")
@@ -25,6 +28,7 @@ PLAN_MARKER = re.compile(r"<!--\s*sheriff-plan\s+v=(\d+)\s+base=([0-9a-f]{40})(?
 START_MARKER = re.compile(r"<!--\s*sheriff-plan-start\s+v=(\d+)\s*-->")
 FAILED_MARKER = re.compile(r"<!--\s*sheriff-plan-failed\s+v=(\d+)\s*-->")
 BUDGET_MARKER = "<!-- sheriff-plan-budget -->"
+DECISION_MARKER = re.compile(r"<!--\s*sheriff-decision\s+v=(\d+)\s*-->")
 PLAN_COMMAND = re.compile(r"^\s*/sheriff plan\s*$")
 REPLAN_COMMAND = re.compile(r"^\s*/sheriff replan\s+(\S[\s\S]*?)\s*$")
 STALE_MINUTES = 30
@@ -42,12 +46,21 @@ USAGE_MARKER = re.compile(r"<!--\s*sheriff-usage\s+(\{.*\})\s*-->")
 NO_PLAN_LABEL = "sheriff:no-plan"
 KEY_SEPARATOR = "/plan-"
 DEFAULT_MODEL = "claude:claude-opus-5-5"
-SECTIONS = ("Priority", "Problem", "Solution space", "Chosen approach", "Tests", "Production check", "Out of scope")
+SECTIONS = ("Priority", "Decision needed", "Problem", "Solution space", "Chosen approach", "Tests", "Production check", "Out of scope")
 PRIORITY_LINE = re.compile(r"[-*_`>\s]*(P[0-3])(?![0-9A-Za-z])")
 PRIORITY_LABELS = {"P0": ("b60205", "Production is broken or unsafe now"),
                    "P1": ("d93f0b", "A real problem with a workaround, or blocks other work: this week"),
                    "P2": ("fbca04", "A normal fix or improvement (the default)"),
                    "P3": ("c5def5", "Nice to have, cleanup, someday")}
+DECISION_LABEL = "sheriff:needs-decision"
+DECISION_STYLE = ("d876e3", "Sheriff's plan waits for a person's decision before any work starts")
+DECISION_LIMIT = 2_000
+IMAGES_MAX = 10
+IMAGE_BYTES = 5_000_000
+IMAGE_TIMEOUT = 30
+IMAGE_HOSTS = {"private-user-images.githubusercontent.com", "user-images.githubusercontent.com", "objects.githubusercontent.com"}
+IMAGE_TYPES = ((b"\x89PNG\r\n\x1a\n", "png"), (b"\xff\xd8\xff", "jpg"), (b"GIF87a", "gif"), (b"GIF89a", "gif"))
+HTML_ACCEPT = ["-H", "Accept: application/vnd.github.html+json"]
 PLAN_LIMIT = 20_000
 TITLE_LIMIT = 300
 BODY_LIMIT = 20_000
@@ -140,7 +153,7 @@ def read_issue(number, fetch):
             author = raw.get("author") or {}
             issue = {"number": raw.get("number"), "title": raw.get("title") or "", "body": raw.get("body") or "",
                      "open": raw.get("state") == "OPEN", "author": login_of(author), "author_bot": author.get("__typename") == "Bot",
-                     "decision": kind == "decision" or "decision" in labels}
+                     "decision": kind == "decision" or "decision" in labels, "labels": labels}
         if not (page.get("pageInfo") or {}).get("hasNextPage"):
             return dict(issue, comments=comments)
         cursor = page["pageInfo"]["endCursor"]
@@ -253,6 +266,24 @@ def priority_of(text):
     return found.group(1) if found else None
 
 
+def section_of(text, name):
+    found = re.search(r"^#{1,3}\s*" + re.escape(name) + r"\s*$\n?(.*?)(?=^#{1,3}\s|\Z)", str(text or ""), re.I | re.M | re.S)
+    return found.group(1).strip() if found else ""
+
+
+def decision_of(text):
+    question = section_of(text, "Decision needed")
+    return "" if re.match(r"[-*_`>\s]*none\b", question, re.I) else question
+
+
+def decision_note(version, question, who):
+    mention = " ".join("@" + login for login in who)
+    lead = (mention + " Sheriff plan v" + str(version) + " needs your decision" if who else "Sheriff plan v" + str(version) + " needs a decision")
+    return ("<!-- sheriff-decision v=" + str(version) + " -->\n" + lead + " before any work starts:\n\n" + escape(question)[:DECISION_LIMIT].strip()
+            + "\n\nReply on this issue with your answer (or comment `/sheriff replan <your answer>`). Sheriff then writes plan v" + str(version + 1)
+            + " from it, and work starts from that plan. Until then the issue carries the `" + DECISION_LABEL + "` label.")
+
+
 def check_plan(text):
     missing = [name for name in SECTIONS if not re.search(r"^#{1,3}\s*" + re.escape(name) + r"\s*$", text, re.I | re.M)]
     if missing:
@@ -312,7 +343,23 @@ def unlocks_of(comments, budgets, marks, role, unlockers):
     return found
 
 
-def decide(issue, slug, role, ack, unlockers, rounds, now, opened=False):
+def answer_of(comments, found, slug, role, deciders, since):
+    if not decision_of(found["body"]):
+        return None
+    asked = [c["created"] for c in comments if c["bot"] and bare(c["author"]) == slug
+             and (DECISION_MARKER.match(first_line(c["body"])) or [None, ""])[1] == str(found["version"])]
+    after = max(asked + [since])
+    for comment in reversed(comments):
+        if comment["created"] <= after:
+            return None
+        if PLAN_COMMAND.match(comment["body"]) or REPLAN_COMMAND.match(comment["body"]):
+            continue
+        if not comment["bot"] and (comment["author"].lower() in deciders or role(comment["author"]) in MAINTAINER_ROLES):
+            return comment
+    return None
+
+
+def decide(issue, slug, role, ack, unlockers, rounds, now, opened=False, deciders=()):
     def result(action, why, version=0, reason="", requester=""):
         return {"action": action, "why": why, "version": version, "reason": reason, "requester": requester}
     why = plannable(issue)
@@ -338,9 +385,12 @@ def decide(issue, slug, role, ack, unlockers, rounds, now, opened=False):
         requester = replan["author"] if replan else ""
     elif current_plan(comments, slug):
         replan, reason = newest_replan(comments, since, role, ack)
-        if not replan:
+        answer = None if replan else answer_of(comments, current_plan(comments, slug), slug, role, deciders, since)
+        if not (replan or answer):
             return result("skip", "already planned")
-        requester = replan["author"]
+        requester = (replan or answer)["author"]
+        if answer:
+            reason = ("answer to the open decision from @" + requester + ": " + answer["body"].strip())[:REASON_LIMIT]
     else:
         asks = [c for c in comments if c["created"] > since and command(c, PLAN_COMMAND, role, ack)]
         replan, reason = newest_replan(comments, since, role, ack)
@@ -394,7 +444,7 @@ def reserve(args):
     role, now, opened = make_role(), datetime.datetime.now(datetime.timezone.utc), args.event == "opened"
     named = "" if task_id(issue["title"]) or issue["author_bot"] else name_task(issue["title"], issue["number"])
     candidate = dict(issue, title=(named + ": " + issue["title"])[:TITLE_MAX]) if named else issue
-    decided = decide(candidate, slug, role, logins(args.ack_authors), logins(args.unlock_authors), args.rounds, now, opened)
+    decided = decide(candidate, slug, role, logins(args.ack_authors), logins(args.unlock_authors), args.rounds, now, opened, logins(args.deciders))
     named = named if decided["action"] == "plan" else ""
     if named:
         gh_json(["api", "-X", "PATCH", "repos/{owner}/{repo}/issues/" + str(args.issue), "-f", "title=" + candidate["title"]])
@@ -425,13 +475,84 @@ def recheck(args):
     if issue is None:
         return output(action="skip", why="issue not found")
     decided = decide(issue, bare(login), make_role(), logins(args.ack_authors), logins(args.unlock_authors), args.rounds,
-                     datetime.datetime.now(datetime.timezone.utc))
+                     datetime.datetime.now(datetime.timezone.utc), deciders=logins(args.deciders))
     return output(action=decided["action"], why=decided["why"])
 
 
 def write_json(path, value):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, indent=2))
+
+
+def attachment(url):
+    parts = urllib.parse.urlsplit(str(url or ""))
+    host = (parts.hostname or "").lower()
+    return parts.scheme == "https" and (host in IMAGE_HOSTS or (host == "github.com" and parts.path.startswith("/user-attachments/assets/")))
+
+
+class ImageFinder(html.parser.HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.found = []
+
+    def handle_starttag(self, tag, attrs):
+        source = dict(attrs).get("src") if tag == "img" else None
+        if attachment(source) and source not in self.found:
+            self.found.append(source)
+
+
+def image_urls(text):
+    finder = ImageFinder()
+    finder.feed(str(text or ""))
+    return finder.found
+
+
+def image_type(data):
+    found = next((kind for magic, kind in IMAGE_TYPES if data.startswith(magic)), None)
+    return found or ("webp" if data[:4] == b"RIFF" and data[8:12] == b"WEBP" else None)
+
+
+class AttachmentRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not attachment(newurl):
+            raise urllib.error.HTTPError(newurl, code, "redirect outside GitHub's attachment hosts", headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def fetch_image(url):
+    opener = urllib.request.build_opener(AttachmentRedirects)
+    with opener.open(urllib.request.Request(url, headers={"User-Agent": "gh-sheriff"}), timeout=IMAGE_TIMEOUT) as response:
+        return response.read(IMAGE_BYTES + 1)
+
+
+def issue_html(number, ids):
+    path = "repos/{owner}/{repo}/issues/" + str(number)
+    issue = gh_json(["api", *HTML_ACCEPT, path]) or {}
+    sources = [("the issue", str((issue if isinstance(issue, dict) else {}).get("body_html") or ""))]
+    pages = gh_json(["api", *HTML_ACCEPT, "--paginate", "--slurp", path + "/comments?per_page=100"]) or []
+    for row in (row for page in pages if isinstance(page, list) for row in page if isinstance(row, dict)):
+        if row.get("id") in ids:
+            sources.append(("a comment by " + str((row.get("user") or {}).get("login") or "someone"), str(row.get("body_html") or "")))
+    return sources
+
+
+def save_images(sources, out, fetch):
+    images, unread = [], 0
+    for origin, text in sources:
+        for url in image_urls(text):
+            try:
+                data = fetch(url) if len(images) < IMAGES_MAX else b""
+            except (OSError, ValueError):
+                data = b""
+            kind = image_type(data) if len(data) <= IMAGE_BYTES else None
+            if not kind:
+                unread += 1
+                continue
+            name = str(len(images) + 1) + "." + kind
+            (out / "images").mkdir(parents=True, exist_ok=True)
+            (out / "images" / name).write_bytes(data)
+            images.append({"file": out.name + "/images/" + name, "from": origin})
+    return images, unread
 
 
 def prepare(args):
@@ -454,10 +575,17 @@ def prepare(args):
         return skip("the reservation of plan v" + str(version) + " is no longer open")
     base = run(["git", "rev-parse", "HEAD"], cwd=args.checkout).strip()
     role, ack = make_role(), logins(args.ack_authors)
-    shown = [{"author": c["author"], "created": c["created"], "body": c["body"][:COMMENT_LIMIT]} for c in issue["comments"]
-             if not (c["bot"] and bare(c["author"]) == args.app) and trusted(c["author"], c["bot"], role, ack)][-COMMENTS_SHOWN:]
-    write_json(out / "issue.json", {"number": issue["number"], "title": issue["title"][:TITLE_LIMIT], "body": issue["body"][:BODY_LIMIT],
-                                    "author": issue["author"], "comments": shown})
+    kept = [c for c in issue["comments"] if not (c["bot"] and bare(c["author"]) == args.app) and trusted(c["author"], c["bot"], role, ack)][-COMMENTS_SHOWN:]
+    shown = [{"author": c["author"], "created": c["created"], "body": c["body"][:COMMENT_LIMIT]} for c in kept]
+    try:
+        images, unread = save_images(issue_html(args.issue, {c["id"] for c in kept}), out, fetch_image)
+    except (PlanError, OSError, ValueError):
+        images, unread = [], -1
+    data = {"number": issue["number"], "title": issue["title"][:TITLE_LIMIT], "body": issue["body"][:BODY_LIMIT],
+            "author": issue["author"], "comments": shown, "images": images}
+    if unread:
+        data["images_note"] = "the attached images could not be read" if unread < 0 else str(unread) + " attached image(s) could not be read"
+    write_json(out / "issue.json", data)
     write_json(out / "request.json", {"issue": args.issue, "version": version, "reason": str(request.get("reason") or ""),
                                       "requester": str(request.get("requester") or ""), "base": base})
     current = current_plan(issue["comments"], args.app)
@@ -522,6 +650,27 @@ def apply_priority(number, level, slug):
     return "set"
 
 
+def warning(text):
+    print(json.dumps({"ok": False, "warning": text}), file=sys.stderr, flush=True)
+
+
+def apply_decision(issue, version, question, deciders):
+    path = "repos/{owner}/{repo}/issues/" + str(issue["number"])
+    if not question:
+        if DECISION_LABEL in issue.get("labels", []):
+            gh_json(["api", "-X", "DELETE", path + "/labels/" + urllib.parse.quote(DECISION_LABEL, safe="")])
+        return
+    try:
+        run(["gh", "label", "create", DECISION_LABEL, "--color", DECISION_STYLE[0], "--description", DECISION_STYLE[1], "--force"])
+        gh_json(["api", "-X", "POST", path + "/labels", "-f", "labels[]=" + DECISION_LABEL])
+    except PlanError as exc:
+        warning("decision of issue " + str(issue["number"]) + ": the label was not set: " + str(exc))
+    who = [login for login in deciders if not login.endswith("[bot]")]
+    if not deciders and issue["author"] and not issue["author_bot"]:
+        who = [issue["author"]]
+    post_comment(issue["number"], decision_note(version, question, who))
+
+
 def patch_comment(comment_id, body):
     with tempfile.TemporaryDirectory() as folder:
         path = pathlib.Path(folder) / "body.md"
@@ -567,6 +716,10 @@ def post(args):
             apply_priority(args.issue, level, slug)
         except PlanError as exc:
             print(json.dumps({"ok": False, "warning": "priority label of issue " + str(args.issue) + ": " + str(exc)}), file=sys.stderr, flush=True)
+    try:
+        apply_decision(issue, args.version, decision_of(record["text"]), logins(args.deciders))
+    except PlanError as exc:
+        warning("decision of issue " + str(args.issue) + ": " + str(exc))
     prs = ""
     try:
         rows = gh_json(["pr", "list", "--state", "open", "--limit", "200", "--json", "number,title,closingIssuesReferences"])
@@ -586,11 +739,13 @@ def main(argv=None):
     r.add_argument("--ack-authors", default="")
     r.add_argument("--unlock-authors", default="")
     r.add_argument("--event", default="")
+    r.add_argument("--deciders", default="")
     d = sub.add_parser("decide")
     d.add_argument("--issue", type=int, required=True)
     d.add_argument("--rounds", type=int, default=3)
     d.add_argument("--ack-authors", default="")
     d.add_argument("--unlock-authors", default="")
+    d.add_argument("--deciders", default="")
     q = sub.add_parser("prepare")
     q.add_argument("--issue", type=int, required=True)
     q.add_argument("--request", required=True)
@@ -615,6 +770,7 @@ def main(argv=None):
     s.add_argument("--issue", type=int, required=True)
     s.add_argument("--version", type=int, required=True)
     s.add_argument("--comment-id", required=True)
+    s.add_argument("--deciders", default="")
     args = parser.parse_args(argv)
     try:
         {"reserve": reserve, "decide": recheck, "prepare": prepare, "run": run_plan, "post": post}[args.command](args)

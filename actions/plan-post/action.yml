@@ -22,6 +22,10 @@ inputs:
     description: Logins whose /sheriff plan comment allows one more plan after the budget (the plan-reserve job's value)
     required: false
     default: ""
+  deciders:
+    description: People asked when a plan has an open decision, instead of the issue's author, comma-separated (the plan-reserve job's value)
+    required: false
+    default: ""
   app-id:
     description: The Sheriff gate App id
     required: true
@@ -50,11 +54,13 @@ runs:
         ISSUE: ${{ inputs.issue }}
         VERSION: ${{ inputs.version }}
         COMMENT_ID: ${{ inputs.comment-id }}
+        DECIDERS: ${{ inputs.deciders }}
         SHERIFF: ${{ github.action_path }}/../..
       run: |
         set -euo pipefail
         python3 -I "$SHERIFF/scripts/app-token.py" --repo "$GH_REPO" --permission issues=write --permission pull_requests=read --permission contents=read -- \
-          python3 -I "$SHERIFF/scripts/plan.py" post --record plan/plan.json --issue "$ISSUE" --version "$VERSION" --comment-id "$COMMENT_ID"
+          python3 -I "$SHERIFF/scripts/plan.py" post --record plan/plan.json --issue "$ISSUE" --version "$VERSION" --comment-id "$COMMENT_ID" \
+          --deciders "$DECIDERS"
     - name: Refresh the gate and re-review each linked pull request against the new plan
       if: steps.post.outputs.posted == 'true' && steps.post.outputs.prs != ''
       shell: bash
@@ -95,12 +101,13 @@ runs:
         ROUNDS: ${{ inputs.rounds }}
         SHERIFF_ACK_AUTHORS: ${{ inputs.ack-authors }}
         UNLOCKERS: ${{ inputs.unlock-authors }}
+        DECIDERS: ${{ inputs.deciders }}
         SHERIFF: ${{ github.action_path }}/../..
       run: |
         set -euo pipefail
         python3 -I "$SHERIFF/scripts/app-token.py" --repo "$GH_REPO" --permission issues=read --permission contents=read -- \
           python3 -I "$SHERIFF/scripts/plan.py" decide --issue "$ISSUE" --rounds "$ROUNDS" --ack-authors "$SHERIFF_ACK_AUTHORS" \
-          --unlock-authors "$UNLOCKERS"
+          --unlock-authors "$UNLOCKERS" --deciders "$DECIDERS"
     - name: Start a new plan run so that command is answered
       if: "!cancelled() && (steps.decide.outputs.action == 'plan' || steps.decide.outputs.action == 'budget')"
       shell: bash

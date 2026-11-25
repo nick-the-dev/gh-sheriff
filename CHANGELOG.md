@@ -1,0 +1,78 @@
+# Changelog
+
+All notable changes to Sheriff are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and Sheriff uses [Semantic Versioning](https://semver.org/). While Sheriff is in beta, a breaking change can still ship
+within `v1`; its entry says so under **Breaking** with the steps to take. [RELEASING.md](RELEASING.md) describes how a
+release is made.
+
+## [Unreleased]
+
+## [1.1.0] - 2026-11-25
+
+### Added
+
+- **Plans ask before work starts.** Every plan has a new second section, **Decision needed**: `None.`, or the question a
+  person must answer before anyone builds, with one line per option and the planner's recommendation. The planner asks
+  when the issue wants approval or a choice first, or when only someone responsible for the project can decide.
+- When a plan asks, Sheriff labels the issue `sheriff:needs-decision` and posts a comment that @mentions the issue's
+  author, or the logins in the new `SHERIFF_DECIDERS` variable, with the question and how to answer. Your agents can
+  skip issues with that label.
+- **A reply is the answer.** A reply from an admin, a maintainer or a login in `SHERIFF_DECIDERS` on a labelled issue
+  writes the next plan from that answer; once no question is left, Sheriff removes the label. This needs the 1.1.0
+  workflow file (see Upgrading); until then, comment `/sheriff replan <your answer>`.
+- **The planner sees pictures.** Images attached to the issue or to a trusted comment (GitHub attachments only, at most
+  10, 5 MB each, PNG, JPEG, GIF or WebP) are downloaded for the planner, which looks at them. Pictures it could not
+  read are reported in the plan.
+- The review blocks a pull request that implements a plan whose question is still open.
+
+### Changed
+
+- Plans have eight sections. A plan without **Decision needed** fails the format check; the planner writes it.
+- Plans and reviews never guess a person's gender, and plans @mention no one.
+
+### Upgrading
+
+- `@v1` repositories get everything at once except reply-triggered plans: run `gh sheriff install` to update
+  `.github/workflows/sheriff.yml`. Pinned repositories get a Dependabot pull request; merge it, then run `install`.
+- No new App permission: labels and comments use Issues: Read and write, which planning already needs.
+
+## [1.0.2] - 2026-11-23
+
+### Fixed
+
+- After a pull request used its review budget, a maintainer's `/sheriff review` could not take effect on the same
+  commit: the budget notice counted as a review of that commit, so the next run said "already reviewed". The notice no
+  longer counts; the allowed review runs on the next push, or at once with
+  `gh workflow run sheriff.yml -f pr=<n> -f review=true`. A commit already stopped by the budget gets no duplicate
+  notices.
+
+## [1.0.1] - 2026-11-23
+
+### Fixed
+
+- `gh sheriff install` on a personal account no longer stops at "You must authenticate with an access token
+  authorized to a GitHub App": a gh login cannot list a personal account's App installations, so the first Sheriff run
+  checks that the App can reach the repository.
+- `--no-files` with `--updates pinned` stops when `.github/dependabot.yml` is missing instead of opening a pull
+  request, and `install` says when it moves a pin.
+
+## [1.0.0] - 2026-11-23
+
+First versioned release. Sheriff is in beta: behaviour, settings and messages can still change.
+
+### Added
+
+- Versions: each release is an immutable `vX.Y.Z` tag with release notes; `v1` follows the latest `v1.x`.
+- `gh sheriff install --updates auto|pinned`. `pinned` runs one exact release and adds `.github/dependabot.yml` for
+  GitHub Actions, so newer releases arrive as pull requests. `auto` (the default) keeps following `v1`.
+- `gh sheriff doctor` reports your CLI version, the update mode, the release your workflow runs and the latest release.
+- Planning: a plain issue a trusted person opens is named (`WORDS-<number>: title`) and planned within a minute.
+- Priorities: every plan starts with a Priority section (P0 to P3) and Sheriff labels the issue `priority:Pn`; a label
+  a person set is never changed.
+- Plans and reviews are written in plain language.
+
+[Unreleased]: https://github.com/nick-the-dev/gh-sheriff/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/nick-the-dev/gh-sheriff/compare/v1.0.2...v1.1.0
+[1.0.2]: https://github.com/nick-the-dev/gh-sheriff/compare/v1.0.1...v1.0.2
+[1.0.1]: https://github.com/nick-the-dev/gh-sheriff/compare/v1.0.0...v1.0.1
+[1.0.0]: https://github.com/nick-the-dev/gh-sheriff/releases/tag/v1.0.0
