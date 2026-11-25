@@ -83,7 +83,12 @@ def writes(args, stdin=None):
     if args[:1] != ["api"]:
         return False
     if args[1:2] == ["graphql"]:
-        return "mutation" in (stdin or "") or any("mutation" in arg for arg in args)
+        try:
+            query = str((json.loads(stdin) or {}).get("query") or "") if stdin else ""
+        except (ValueError, AttributeError):
+            query = ""
+        query = query or next((arg[len("query="):] for arg in args if arg.startswith("query=")), "")
+        return query.lstrip().startswith("mutation")
     method = next((args[index + 1] for index, arg in enumerate(args[:-1]) if arg in ("-X", "--method")), None)
     return method.upper() != "GET" if method else any(arg in ("-f", "-F", "--field", "--raw-field", "--input") for arg in args)
 
@@ -196,7 +201,10 @@ def ensure_environment(info, environment=ENVIRONMENT):
     if not configured:
         change(("set" if current else "create") + " the '" + environment + "' environment for custom branch policies",
                ["api", "-X", "PUT", path, "--input", "-"], json.dumps({"deployment_branch_policy": wanted}))
-    policies = (gh_json(["api", path + "/deployment-branch-policies"]) if configured or not DRY_RUN else None) or {}
+    try:
+        policies = (gh_json(["api", path + "/deployment-branch-policies"]) if current or not DRY_RUN else None) or {}
+    except SheriffError:
+        policies = {}
     names = {item.get("name") for item in policies.get("branch_policies", [])}
     for extra in names - {info["branch"]}:
         policy = next(item for item in policies["branch_policies"] if item.get("name") == extra)
@@ -205,7 +213,8 @@ def ensure_environment(info, environment=ENVIRONMENT):
     if info["branch"] not in names:
         change("limit the '" + environment + "' environment to " + info["branch"],
                ["api", "-X", "POST", path + "/deployment-branch-policies", "-f", "name=" + info["branch"], "-f", "type=branch"])
-    say("ok  environment '" + environment + "' is limited to " + info["branch"])
+    if not DRY_RUN or (configured and names == {info["branch"]}):
+        say("ok  environment '" + environment + "' is limited to " + info["branch"])
 
 
 PROJECTS_PERMISSION = "organization_projects"
@@ -746,6 +755,8 @@ def ensure_trigger_files(info, wait_merge=True, pin=""):
 def ensure_auto_merge(info):
     if not info["auto_merge"]:
         change("turn on auto-merge for " + info["repo"], ["api", "-X", "PATCH", "repos/" + info["repo"], "-F", "allow_auto_merge=true"])
+        if DRY_RUN:
+            return
     say("ok  auto-merge is on: a pull request merges itself once every required check is green")
 
 
@@ -836,6 +847,15 @@ def covers(current, wanted):
     return current == wanted
 
 
+def required_checks(ruleset):
+    return {(check.get("context"), check.get("integration_id")) for rule in (ruleset or {}).get("rules") or [] if rule.get("type") == "required_status_checks"
+            for check in (rule.get("parameters") or {}).get("required_status_checks") or []}
+
+
+def ruleset_current(current, wanted):
+    return covers(current, wanted) and required_checks(current) == required_checks(wanted)
+
+
 def ensure_ruleset(info, app_id, assume_yes=False, create=True):
     repo = info["repo"]
     rulesets = gh_json(["api", "repos/" + repo + "/rulesets"]) or []
@@ -858,7 +878,7 @@ def ensure_ruleset(info, app_id, assume_yes=False, create=True):
         created = change("create the '" + RULESET + "' ruleset", ["api", "-X", "POST", "repos/" + repo + "/rulesets", "--input", "-"], json.dumps(ruleset))
         if created:
             say("ok  ruleset '" + RULESET + "' (" + str(created["id"]) + ") is active")
-    elif covers(gh_json(["api", "repos/" + repo + "/rulesets/" + str(current["id"])]), ruleset):
+    elif ruleset_current(gh_json(["api", "repos/" + repo + "/rulesets/" + str(current["id"])]), ruleset):
         say("ok  ruleset '" + RULESET + "' is current: " + checks)
     elif change("rewrite the '" + RULESET + "' ruleset to require " + checks,
                 ["api", "-X", "PUT", "repos/" + repo + "/rulesets/" + str(current["id"]), "--input", "-"], json.dumps(ruleset)) is not None or not DRY_RUN:
@@ -1060,10 +1080,10 @@ def project_title(repo, explicit=None):
 
 def turn_on_work_state(info, explicit, wait):
     repo, title = info["repo"], project_title(info["repo"], explicit)
-    if not ensure_work_state(info, title, wait) and not DRY_RUN:
-        say("--  work state stays off until the issue fields exist")
-        return False
     was_on, kept = repo_variable(repo, "SHERIFF_WORK_STATE") == "on", repo_variable(repo, "SHERIFF_WORK_STATE_SINCE")
+    if not ensure_work_state(info, title, wait) and not DRY_RUN:
+        say("!!  work state stays on, but its setup is incomplete: fix the problems above" if was_on else "--  work state stays off until the issue fields exist")
+        return False
     since = (kept if was_on else "") or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     if explicit and explicit != repo_variable(repo, "SHERIFF_PROJECT"):
         set_variable(repo, "SHERIFF_PROJECT", explicit)
@@ -1281,7 +1301,6 @@ def install(args):
     app_id = app_id or known_app_id(slug_for(info["owner"]))
     if app_id:
         set_variable(info["repo"], "SHERIFF_APP_ID", str(app_id))
-    set_variable(info["repo"], "SHERIFF_APP_SLUG", slug_for(info["owner"]))
     try:
         ensure_installed(info, app_id, pem, interactive)
     except SheriffError as exc:
@@ -1302,35 +1321,45 @@ def install(args):
     ensure_auto_merge(info)
     first_run(info)
     ensure_ruleset(info, app_id, args.yes or DRY_RUN)
-    if args.no_work_state:
-        pass
-    elif new or repo_variable(info["repo"], "SHERIFF_WORK_STATE") == "on":
-        turn_on_work_state(info, args.project_name, interactive)
+    if not args.no_work_state and (new or repo_variable(info["repo"], "SHERIFF_WORK_STATE") == "on"):
+        if not turn_on_work_state(info, args.project_name, interactive):
+            raise SheriffError("work state is not set up; fix the problems above and run gh sheriff install again")
     else:
-        say("--  work state stays off on this existing install: gh sheriff update --work-state on turns it on")
+        say("--  work state stays off" + ("" if args.no_work_state else " on this existing install: gh sheriff update --work-state on turns it on"))
+        no_effect(args.project_name)
+    set_variable(info["repo"], "SHERIFF_APP_SLUG", slug_for(info["owner"]))
     say("Dry run done: nothing was changed." if DRY_RUN else
         "Done. Every new pull request head is now reviewed by Sheriff, and GitHub merges only what Sheriff marks green.")
+
+
+def no_effect(project_name):
+    if project_name:
+        say("!!  --project-name has no effect while work state is off")
 
 
 def update(args):
     info = repo_info(resolve_repo(args.repo))
     repo = info["repo"]
-    if not repo_variable(repo, "SHERIFF_APP_SLUG"):
-        raise SheriffError("Sheriff is not installed on " + repo + ": run gh sheriff install")
     if not info["admin"]:
         raise SheriffError("updating Sheriff needs admin rights on " + repo)
+    if not repo_variable(repo, "SHERIFF_APP_SLUG"):
+        raise SheriffError("Sheriff is not installed on " + repo + ": run gh sheriff install")
     say("Updating Sheriff on " + repo + " to v" + VERSION + (" (dry run: lines starting with 'would' are the changes; nothing is written)" if DRY_RUN else ""))
     ensure_trigger_files(info, pin=update_pin(info, None))
     app_id = repo_variable(repo, "SHERIFF_APP_ID")
     ensure_ruleset(info, int(app_id) if app_id.isdigit() else known_app_id(slug_for(info["owner"])), True, create=False)
     on = repo_variable(repo, "SHERIFF_WORK_STATE") == "on"
-    if args.work_state == "off":
-        set_variable(repo, "SHERIFF_WORK_STATE", "off" if on else repo_variable(repo, "SHERIFF_WORK_STATE"))
-        say("ok  work state is off; the issue fields, the board and every Stage stay as they are")
-    elif on or args.work_state == "on":
-        turn_on_work_state(info, args.project_name, False)
+    if args.work_state != "off" and (on or args.work_state == "on"):
+        if not turn_on_work_state(info, args.project_name, False):
+            raise SheriffError("work state is not set up; fix the problems above and run gh sheriff update again")
+    elif args.work_state == "off" and on:
+        set_variable(repo, "SHERIFF_WORK_STATE", "off")
+        if not DRY_RUN:
+            say("ok  work state is off; the issue fields, the board and every Stage stay as they are")
+        no_effect(args.project_name)
     else:
-        say("--  work state is off: gh sheriff update --work-state on turns it on")
+        say("--  work state is " + ("already off" if args.work_state == "off" else "off: gh sheriff update --work-state on turns it on"))
+        no_effect(args.project_name)
     say("Dry run done: nothing was changed." if DRY_RUN else "Done: Sheriff on " + repo + " matches v" + VERSION + ".")
 
 

@@ -12,7 +12,8 @@ SPEC = importlib.util.spec_from_file_location("work_module", ROOT / "scripts" / 
 work = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(work)
 work.REPO = "o/r"
-NO_VARIABLES = {"SHERIFF_PROJECT": "", "SHERIFF_WORK_STATE_SINCE": "", "SHERIFF_DECIDERS": ""}
+NO_VARIABLES = {name: "" for name in ("SHERIFF_PROJECT", "SHERIFF_WORK_STATE_SINCE", "SHERIFF_DECIDERS", "SHERIFF_VERSION_URL", "SHERIFF_DEPLOY_WORKFLOW",
+                                       "SHERIFF_HEALTH_URL")}
 work.VARIABLES.update(NO_VARIABLES)
 
 C1, C2, PROD = "1" * 40, "2" * 40, "f" * 40
@@ -485,13 +486,13 @@ class MakeIdTest(unittest.TestCase):
 
 
 class CommandTest(unittest.TestCase):
-    def call(self, argv, entry=None, prs=None, known=KNOWN, open_items=(), closed=(), live=(C1,), searched=()):
+    def call(self, argv, entry=None, prs=None, known=KNOWN, open_items=(), closed=(), live=(C1,), searched=(), every=None):
         calls = []
         patches = {
             "use_repo": lambda explicit=None: "o/r", "schema": lambda: known,
             "lookup": lambda task: entry, "issues": lambda state="OPEN", pages=0: list(open_items),
             "closed_matches": lambda task: [c for c in closed if c["id"] == task],
-            "pull_requests": lambda pages=0, merged=True: (prs or {}, "main"),
+            "pull_requests": lambda pages=0, merged=True: ((every if pages == work.MAX_PAGES and every is not None else prs) or {}, "main"),
             "release_check": lambda branch: (lambda commit: "released" if commit in live else ""),
             "set_fields": lambda known, e, **values: calls.append(("set", values)),
             "comment": lambda e, body, mark=work.AGENT_MARK: calls.append(("comment", body + "\n\n" + mark)),
@@ -543,7 +544,7 @@ class CommandTest(unittest.TestCase):
                 self.assertIn("released", json.loads(out)["error"])
 
     def test_verify_of_work_without_a_pull_request_records_a_marker_without_a_sha(self):
-        code, calls, _ = self.call(["verify", "A", "--evidence-file", "long"], item(stage="Released"), {"A": [pr("CLOSED")]})
+        code, calls, _ = self.call(["verify", "A", "--evidence-file", "long"], item(stage="Released"))
         self.assertEqual(code, 0)
         self.assertTrue(calls[0][1].endswith("\n\n" + mark(work.NO_MERGE)))
         self.assertEqual(work.marked_sha(calls[0][1]), work.NO_MERGE)
@@ -552,6 +553,16 @@ class CommandTest(unittest.TestCase):
         code, calls, _ = self.call(["verify", "A", "--evidence-file", "long"], item(stage="Released"), searched=[pr("MERGED", C2, "2026-10-01", 3)], live=(C2,))
         self.assertEqual(code, 0)
         self.assertTrue(calls[0][1].endswith("\n\n" + mark(C2)))
+
+    def test_verify_never_records_sha_none_for_a_task_with_pull_requests_outside_the_recent_window(self):
+        for found, code in (([pr("CLOSED", number=3)], 1), ([pr("MERGED", C2, "2026-10-01", 3)], 0)):
+            with self.subTest(found=found):
+                result, calls, out = self.call(["verify", "A", "--evidence-file", "long"], item(stage="Released"), live=(C2,), every={"A": found})
+                self.assertEqual(result, code)
+                if code:
+                    self.assertEqual(calls, [])
+                else:
+                    self.assertTrue(calls[0][1].endswith(mark(C2)))
 
     def test_verify_does_not_reclose_an_issue_closed_at_merge(self):
         code, calls, _ = self.call(["verify", "A", "--evidence-file", "long"], item(stage="Released", is_open=False, reason="COMPLETED"), MERGED)
@@ -783,6 +794,10 @@ class TriageTest(unittest.TestCase):
         self.assertEqual(calls, [("set", "A", {"stage": "Candidate"}), ("release", "A")])
         self.assertEqual(result["changes"][0]["why"], "its pull requests were closed without merging")
 
+    def test_only_abandoned_work_loses_its_claim(self):
+        result, calls = self.run_sync([item(stage=None, claimed_by="agent-1"), item("B", 2, "Verified", claimed_by="agent-2")], {})
+        self.assertEqual([call[0] for call in calls], ["set", "comment", "set"])
+
     def test_pull_requests_closed_before_the_issue_or_beside_an_open_one_change_nothing(self):
         old, live = pr("CLOSED"), pr("CLOSED", number=11)
         old["closed_at"], live["closed_at"] = "2026-10-01T00:00:00Z", "2026-11-04T00:00:00Z"
@@ -825,6 +840,16 @@ class VariableTest(unittest.TestCase):
     def test_an_unreadable_variable_is_empty(self):
         with mock.patch.dict(work.os.environ, {}, clear=True), mock.patch.object(work, "gh", return_value=mock.Mock(returncode=1, stdout="")):
             self.assertEqual(work.board_title("o/r"), "r work")
+
+
+class RepositoryVariableReleaseTest(unittest.TestCase):
+    def test_the_release_settings_come_from_repository_variables_outside_ci(self):
+        work.VARIABLES.update({"SHERIFF_VERSION_URL": "u", "SHERIFF_HEALTH_URL": "h"})
+        self.addCleanup(work.VARIABLES.update, NO_VARIABLES)
+        with mock.patch.dict(work.os.environ, {}, clear=True), mock.patch.object(work, "served_sha", lambda url: PROD), \
+                mock.patch.object(work, "answers", lambda url: url == "h"), \
+                mock.patch.object(work, "gh", return_value=mock.Mock(returncode=0, stdout="ahead\n")):
+            self.assertIn("h answers 200", work.release_check("main")(C1))
 
 
 class HealthTest(unittest.TestCase):

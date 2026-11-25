@@ -34,6 +34,7 @@ ASK_LABEL = "sheriff:needs-person"
 PRIORITIES = ("P0", "P1", "P2", "P3")
 DEFAULT_PRIORITY = "P2"
 REVERT_WHY = "Verified without recorded evidence"
+ABANDONED_WHY = "its pull requests were closed without merging"
 STOP_WORDS = frozenset("a an and as at be by for from in into is it of on or the to with".split())
 PAGES = 2
 RESERVE = 100
@@ -55,12 +56,11 @@ def setting(name):
 
 
 def variable(name):
+    if setting(name):
+        return setting(name)
     if name not in VARIABLES:
-        value = setting(name)
-        if not value and REPO:
-            found = gh(["variable", "get", name, "--repo", REPO])
-            value = found.stdout.strip() if found.returncode == 0 else ""
-        VARIABLES[name] = value
+        found = gh(["variable", "get", name, "--repo", REPO]) if REPO else None
+        VARIABLES[name] = found.stdout.strip() if found and found.returncode == 0 else ""
     return VARIABLES[name]
 
 
@@ -317,7 +317,7 @@ def deploy_runs(workflow, branch):
 
 
 def release_check(branch):
-    check, health = facts_check(branch), setting("SHERIFF_HEALTH_URL")
+    check, health = facts_check(branch), variable("SHERIFF_HEALTH_URL")
     if not health:
         return check
     if not answers(health):
@@ -326,7 +326,7 @@ def release_check(branch):
 
 
 def facts_check(branch):
-    url, workflow, cache = setting("SHERIFF_VERSION_URL"), setting("SHERIFF_DEPLOY_WORKFLOW"), {}
+    url, workflow, cache = variable("SHERIFF_VERSION_URL"), variable("SHERIFF_DEPLOY_WORKFLOW"), {}
     if url:
         sha = served_sha(url)
         return lambda commit: ("production serves `" + sha + "`, which contains `" + commit + "`"
@@ -484,7 +484,7 @@ def sync(apply, only=None, pages=PAGES):
             if not item["stage"]:
                 target, why = "Candidate", "it had no stage"
             elif abandoned(item, found):
-                target, why = "Candidate", "its pull requests were closed without merging"
+                target, why = "Candidate", ABANDONED_WHY
         if not target:
             continue
         changes.append(dict({"id": item["id"], "number": item["number"], "open": item["open"], "from": item["stage"], "to": target},
@@ -504,7 +504,7 @@ def sync(apply, only=None, pages=PAGES):
         if target == "Candidate" and not item["verify"]:
             values["verify"] = "Live check"
         set_fields(known, item, **values)
-        if target == "Candidate" and item.get("claimed_by") and known.get("claim"):
+        if why == ABANDONED_WHY and item.get("claimed_by") and known.get("claim"):
             release_claim(known, item)
         if back and not item["open"]:
             reopen(item)
@@ -865,8 +865,10 @@ def run(args):
         found = prs.get(item["id"], [])
         merges = {pr["number"]: pr for pr in [pr for pr in found if pr["state"] == "MERGED"] + task_merges(item["id"], branch)}
         merge = latest_merge(item, list(merges.values()))
-        if not merge and any(pr["state"] == "OPEN" for pr in found):
-            raise WorkError("#" + str(item["number"]) + " has an open pull request and no released merge, so there is nothing released to verify")
+        every = pull_requests(MAX_PAGES)[0].get(item["id"], []) if not merge and item["id"] else []
+        merge = merge or latest_merge(item, [pr for pr in every if pr["state"] == "MERGED"])
+        if not merge and every:
+            raise WorkError("#" + str(item["number"]) + " has pull requests but no merge known to be released, so there is nothing released to verify")
         if merge and not (merge["commit"] and release_check(branch)(merge["commit"])):
             raise WorkError("#" + str(item["number"]) + " has no merge into the default branch known to be released, so there is no released commit to verify")
         comment(item, "## Verified in production\n\n" + evidence, VERIFIED_MARK.format(merge["commit"] if merge else NO_MERGE))

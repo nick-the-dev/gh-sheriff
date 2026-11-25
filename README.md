@@ -449,8 +449,8 @@ next sync, which reopens a closed issue. That audit covers open issues and issue
 `SHERIFF_WORK_STATE_SINCE`, which `install` or `update --work-state on` sets when it turns work state on, so history from before Sheriff tracked the
 work is left alone; `gh sheriff doctor` and `gh sheriff task sync` (a dry run) say how many tasks the next sync would set
 back. `task verify` works only from Released, and `task set` can't set Verified. `task verify` looks for the task's
-merge among recent pull requests and by searching for its ID; work with no merge (a setting changed by hand) records its
-evidence without a commit. The sync also runs when an issue is opened or retitled. Pull requests from forks are ignored.
+merge among recent pull requests and by searching for its ID; work that no pull request names at all (a setting changed
+by hand) records its evidence without a commit. The sync also runs when an issue is opened or retitled. Pull requests from forks are ignored.
 
 The board is `<repo> work` unless `SHERIFF_PROJECT` names another. Its built-in `Status` mirrors `Stage` only when a `gh` login with Projects access writes it (`task set`,
 `task verify`, `task board-status --apply`). CI's sync runs with the job token, which can't write Projects, so run

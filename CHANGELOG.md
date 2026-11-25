@@ -37,8 +37,10 @@ release is made.
   progress work whose pull requests were all closed without merging to Candidate, releasing its claim. The state job
   also runs when an issue is opened or retitled.
 - `task verify` finds the task's merge by searching for its ID, not only among the 200 most recent merged pull requests,
-  and verifies work without a pull request (its evidence comment carries `sha=none`).
-- `SHERIFF_HEALTH_URL` also gates Released: no task becomes Released while it does not return 200.
+  and verifies work that no pull request names (its evidence comment carries `sha=none`).
+- `SHERIFF_HEALTH_URL` also gates Released: no task becomes Released while it does not return 200. Outside CI, `task`
+  commands, `doctor` and dry runs read `SHERIFF_VERSION_URL`, `SHERIFF_DEPLOY_WORKFLOW` and `SHERIFF_HEALTH_URL` from the
+  repository variables.
 
 ### Changed
 

@@ -872,7 +872,7 @@ class WorkStateSwitchTests(unittest.TestCase):
 
 
 class UpdateCommandTests(unittest.TestCase):
-    def update(self, variables, *flags):
+    def update(self, variables, *flags, failing=False):
         calls, written, out = [], {}, io.StringIO()
         refused = {name: mock.Mock(side_effect=AssertionError(name + " must not run")) for name in
                    ("ensure_environment", "ensure_gate_app", "ensure_secrets", "choose_reviewers", "ensure_planning", "ensure_merges", "first_run", "ensure_auto_merge")}
@@ -881,7 +881,7 @@ class UpdateCommandTests(unittest.TestCase):
                        update_pin=lambda info, choice: calls.append(("pin", choice)) or "",
                        ensure_trigger_files=lambda info, wait_merge=True, pin="": calls.append(("files", pin)),
                        ensure_ruleset=lambda info, app_id, assume_yes=False, create=True: calls.append(("ruleset", app_id, create)),
-                       turn_on_work_state=lambda info, explicit, wait: calls.append(("work state", explicit)))
+                       turn_on_work_state=lambda info, explicit, wait: calls.append(("work state", explicit)) or not failing)
         with mock.patch.multiple(cli, **patches), mock.patch("sys.stdout", out):
             code = cli.main(["update", "--repo", "o/r"] + list(flags))
         return code, calls, written, out.getvalue()
@@ -937,6 +937,80 @@ class BoardItemsTests(unittest.TestCase):
                                     add_to_board=lambda board, tasks: added.extend(tasks) or len(tasks)), mock.patch("sys.stdout", out):
             self.assertTrue(cli.ensure_work_state(ORG, "r work"))
         self.assertEqual([item["id"] for item in added], ["B"])
+
+
+class ReviewFindingTests(unittest.TestCase):
+    def test_a_graphql_read_naming_mutation_is_not_a_write(self):
+        read = json.dumps({"query": 'query{repository(owner:"mutation-testing",name:"mutation"){id}}'})
+        self.assertFalse(cli.writes(["api", "graphql", "--input", "-"], read))
+        self.assertTrue(cli.writes(["api", "graphql", "--input", "-"], json.dumps({"query": "  mutation($id:ID!){x}"})))
+        self.assertTrue(cli.writes(["api", "graphql", "-f", "query=mutation{x}"]))
+        self.assertFalse(cli.writes(["api", "graphql", "-f", "query=query{mutation:viewer{login}}"]))
+
+    def test_a_retried_first_install_still_counts_as_new_because_the_slug_is_written_last(self):
+        order = []
+        steps = {name: mock.Mock(return_value=(42, None) if name == "ensure_gate_app" else set()) for name in
+                 ("ensure_environment", "ensure_gate_app", "ensure_installed", "ensure_secrets", "choose_reviewers", "ensure_planning", "ensure_merges",
+                  "ensure_trigger_files", "ensure_auto_merge", "first_run", "ensure_ruleset")}
+        with mock.patch.multiple(cli, **steps, repo_info=lambda repo: {"repo": "o/r", "owner": "o", "kind": "Organization", "branch": "main", "admin": True},
+                                 repo_variable=lambda repo, name: "", update_pin=lambda info, choice: "",
+                                 set_variable=lambda repo, name, value: order.append(name),
+                                 turn_on_work_state=lambda info, explicit, wait: order.append("work state") or True), mock.patch("sys.stdout", io.StringIO()):
+            cli.main(["install", "--repo", "o/r", "--yes"])
+        self.assertEqual(order[-2:], ["work state", "SHERIFF_APP_SLUG"])
+
+    def test_an_incomplete_work_state_setup_is_not_reported_as_done(self):
+        out = io.StringIO()
+        with mock.patch.multiple(cli, repo_variable=lambda repo, name: "on" if name == "SHERIFF_WORK_STATE" else "", ensure_work_state=lambda info, title, wait: False,
+                                 set_variable=mock.Mock(side_effect=AssertionError("no write"))), mock.patch("sys.stdout", out):
+            self.assertFalse(cli.turn_on_work_state(ORG, None, False))
+        self.assertIn("work state stays on, but its setup is incomplete", out.getvalue())
+        code, _, _, text = UpdateCommandTests.update(self, {"SHERIFF_APP_SLUG": "s", "SHERIFF_APP_ID": "42", "SHERIFF_WORK_STATE": "on"}, failing=True)
+        self.assertEqual((code, "Done" in text), (1, False))
+
+    def test_messages_say_what_would_happen_and_warn_about_an_unused_board(self):
+        installed = {"SHERIFF_APP_SLUG": "s", "SHERIFF_APP_ID": "42"}
+        cli.DRY_RUN = True
+        self.addCleanup(setattr, cli, "DRY_RUN", False)
+        _, _, _, text = UpdateCommandTests.update(self, dict(installed, SHERIFF_WORK_STATE="on"), "--work-state", "off", "--project-name", "B", "--dry-run")
+        self.assertNotIn("ok  work state is off", text)
+        self.assertIn("--project-name has no effect", text)
+
+    def test_a_dry_run_lists_the_branch_policies_an_existing_environment_would_lose(self):
+        out = io.StringIO()
+        current = {"deployment_branch_policy": {"protected_branches": False, "custom_branch_policies": True}}
+        policies = {"branch_policies": [{"id": 1, "name": "main"}, {"id": 2, "name": "release/*"}]}
+        cli.DRY_RUN = True
+        self.addCleanup(setattr, cli, "DRY_RUN", False)
+        with mock.patch.object(cli, "gh_status", lambda args: True), mock.patch.object(cli, "gh_json", lambda args, stdin=None: policies if args[1].endswith("policies") else current), \
+                mock.patch("sys.stdout", out):
+            cli.ensure_environment({"repo": "o/r", "branch": "main"})
+        self.assertEqual(out.getvalue().splitlines(), ["would remove the branch policy 'release/*' from the 'sheriff' environment"])
+
+    def test_a_differently_configured_environment_still_has_its_policies_read(self):
+        out = io.StringIO()
+        policies = {"branch_policies": [{"id": 2, "name": "dev"}]}
+        cli.DRY_RUN = True
+        self.addCleanup(setattr, cli, "DRY_RUN", False)
+        with mock.patch.object(cli, "gh_status", lambda args: True), \
+                mock.patch.object(cli, "gh_json", lambda args, stdin=None: policies if args[1].endswith("policies") else {"deployment_branch_policy": None}), \
+                mock.patch("sys.stdout", out):
+            cli.ensure_environment({"repo": "o/r", "branch": "main"})
+        self.assertIn("would remove the branch policy 'dev'", out.getvalue())
+        self.assertNotIn("ok  environment", out.getvalue())
+
+    def test_a_different_integration_id_on_a_required_check_rewrites_the_ruleset(self):
+        wanted = cli.build_ruleset({"Lint": None}, 42)
+        current = cli.build_ruleset({"Lint": 5}, 42)
+        self.assertFalse(cli.ruleset_current(current, wanted))
+        self.assertTrue(cli.ruleset_current(cli.build_ruleset({"Lint": None}, 42), wanted))
+
+    def test_update_by_a_non_admin_says_so(self):
+        out = io.StringIO()
+        with mock.patch.multiple(cli, repo_info=lambda repo: {"repo": "o/r", "owner": "o", "kind": "User", "branch": "main", "admin": False},
+                                 repo_variable=lambda repo, name: ""), mock.patch("sys.stdout", out):
+            self.assertEqual(cli.main(["update", "--repo", "o/r"]), 1)
+        self.assertIn("needs admin rights", out.getvalue())
 
 
 if __name__ == "__main__":
