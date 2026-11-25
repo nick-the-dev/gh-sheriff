@@ -7,6 +7,23 @@ release is made.
 
 ## [Unreleased]
 
+### Added
+
+- **Claims.** `gh sheriff task claim <ID>` records who works on a task in a new `Claimed by` issue field before any
+  branch or pull request exists, so two agents no longer start the same task. It is refused when someone else holds
+  the task and changes nothing for the holder; `gh sheriff task release <ID>` clears it (`--force` clears someone
+  else's). The claimant is `--by`, else `SHERIFF_AGENT`, else the gh login. Claims don't expire and stay after the
+  merge as a record of who did the work ([Picking work](README.md#picking-work)).
+- `gh sheriff task status` lists **Ready** tasks: Candidates that are not blocked, not claimed and not labelled
+  `sheriff:needs-decision`. With `--json` they are `ready`, and every item carries `claimed_by`, so a dispatcher can
+  tell its own work from someone else's.
+
+### Upgrading
+
+- Run `gh sheriff install` to add the `Claimed by` issue field and its board column; `gh sheriff doctor` reports it
+  missing until then. Without it `task claim` and `task release` stop and say so; everything else works as before.
+- No new permission: a claim is an issue field, written with Issues: Read and write.
+
 ## [1.1.0] - 2026-11-25
 
 ### Added

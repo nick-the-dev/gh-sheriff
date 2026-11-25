@@ -16,10 +16,11 @@ work.REPO = "o/r"
 C1, C2, PROD = "1" * 40, "2" * 40, "f" * 40
 
 
-def item(task="A", number=1, stage="Candidate", verify="Live check", decision=False, is_open=True, reason=None, blocked_by=(), awaits=None):
+def item(task="A", number=1, stage="Candidate", verify="Live check", decision=False, is_open=True, reason=None, blocked_by=(), awaits=None,
+         claimed_by=None, needs_decision=False):
     return {"id": task, "node": "N" + str(number), "number": number, "title": "t", "open": is_open, "reason": reason, "url": "u",
-            "created": "2026-11-01T00:00:00Z", "type": "Task", "decision": decision, "stage": stage, "verify": verify, "next": None,
-            "blocked_by": list(blocked_by), "awaits_reply": awaits}
+            "created": "2026-11-01T00:00:00Z", "type": "Task", "decision": decision, "needs_decision": needs_decision, "stage": stage,
+            "verify": verify, "next": None, "claimed_by": claimed_by, "blocked_by": list(blocked_by), "awaits_reply": awaits}
 
 
 def pr(state="OPEN", commit=None, merged_at=None, number=10):
@@ -40,7 +41,7 @@ def derive(entry, prs, live=()):
 KNOWN = {"repo": "R", "missing": [], "remaining": 5000, "types": {"Task": "T1", "Bug": "T2", "Feature": "T3"},
          "fields": {"stage": {"id": "F1", "options": [{"name": name, "id": "S" + str(index)} for index, name in enumerate(work.STAGES)]},
                     "verify": {"id": "F2", "options": [{"name": name, "id": "V" + str(index)} for index, name in enumerate(work.VERIFY)]},
-                    "next": {"id": "F3"}}}
+                    "next": {"id": "F3"}}, "claim": {"id": "F4"}}
 
 
 class DeriveTest(unittest.TestCase):
@@ -377,7 +378,7 @@ class ItemTest(unittest.TestCase):
         return {"id": "I1", "number": 12, "title": title, "state": "OPEN", "stateReason": None, "url": "u", "createdAt": "c",
                 "issueType": {"name": kind}, "labels": {"nodes": [{"name": name} for name in labels]},
                 "issueFieldValues": {"nodes": [{"name": "Released", "field": {"name": "Stage"}}, {"value": "decide", "field": {"name": "Next action"}},
-                                               {"name": "High", "field": {"name": "Priority"}}, {}]},
+                                               {"name": "High", "field": {"name": "Priority"}}, {"value": "agent-7", "field": {"name": "Claimed by"}}, {}]},
                 "blockedBy": {"nodes": [{"number": 7, "state": "CLOSED"}]}, "comments": {"nodes": []}}
 
     def test_issue_becomes_an_item(self):
@@ -385,6 +386,8 @@ class ItemTest(unittest.TestCase):
         self.assertEqual((made["id"], made["title"], made["stage"], made["next"], made["verify"], made["decision"]),
                          ("OBS-05", "Alerts", "Released", "decide", None, False))
         self.assertEqual(made["blocked_by"], [{"number": 7, "open": False}])
+        self.assertEqual((made["claimed_by"], made["needs_decision"]), ("agent-7", False))
+        self.assertTrue(work.to_item(self.node(labels=("sheriff:needs-decision",)))["needs_decision"])
 
     def test_issue_without_a_task_prefix_has_no_id(self):
         self.assertIsNone(work.to_item(self.node("Add build step to CI"))["id"])
@@ -436,6 +439,16 @@ class OverviewTest(unittest.TestCase):
         self.assertEqual({stage: ids(rows) for stage, rows in view["stages"].items() if rows},
                          {"Candidate": ["A"], "In progress": ["B"], "Merged": ["C"], "Released": ["D"]})
         self.assertIn("Needs human: 1", work.render(view))
+
+    def test_ready_is_unclaimed_unblocked_candidates_without_an_open_question(self):
+        blocker = {"number": 9, "open": True}
+        items = [item("A", 1), item("B", 2, claimed_by="agent-1"), item("C", 3, blocked_by=[blocker]), item("D", 4, needs_decision=True),
+                 item("E", 5, "In progress"), item("Q", 6, "Candidate", decision=True), item("F", 7, "Candidate", is_open=False)]
+        view = work.overview(items)
+        self.assertEqual([row["id"] for row in view["ready"]], ["A"])
+        text = work.render(view)
+        self.assertIn("Ready: unclaimed, unblocked candidates: 1", text)
+        self.assertIn("#2 B: t  [claimed by agent-1]", text)
 
     def test_a_released_blocker_is_met(self):
         view = work.overview([item("A", 1, blocked_by=[{"number": 2, "open": True}]), item("B", 2, "Released")])
@@ -561,6 +574,77 @@ class CommandTest(unittest.TestCase):
         self.assertIn("gh sheriff install", json.loads(out)["error"])
 
 
+class ClaimTest(unittest.TestCase):
+    def call(self, argv, entry=None, known=KNOWN, holder_after="me", env=None, login=None):
+        writes, out = [], io.StringIO()
+
+        def fake_gql(query, variables=None):
+            if query == work.FRESH_QUERY:
+                values = [{"value": holder_after, "field": {"name": "Claimed by"}}] if holder_after else []
+                return {"node": {"state": "OPEN", "issueFieldValues": {"nodes": values}}}
+            writes.append(variables)
+            return {}
+        user = mock.Mock(returncode=0 if login else 1, stdout=(login or "") + "\n")
+        with mock.patch.multiple(work, use_repo=lambda explicit=None: "o/r", schema=lambda: known, lookup=lambda task: entry or item(),
+                                 gql=fake_gql, gh=lambda args, stdin=None: user, CLAIM_SETTLE=0), \
+                mock.patch.dict(work.os.environ, env or {}, clear=True), mock.patch("sys.stdout", out):
+            code = work.main(argv)
+        return code, writes, json.loads(out.getvalue())
+
+    def test_an_unclaimed_task_is_claimed_and_read_back(self):
+        code, writes, out = self.call(["claim", "A", "--by", "me"])
+        self.assertEqual((code, out["claimed_by"]), (0, "me"))
+        self.assertEqual(writes, [{"issue": "N1", "fields": [{"fieldId": "F4", "textValue": "me"}]}])
+
+    def test_claiming_again_as_the_holder_writes_nothing(self):
+        self.assertEqual(self.call(["claim", "A", "--by", "me"], item(claimed_by="me"))[:2], (0, []))
+
+    def test_a_task_someone_else_holds_is_refused(self):
+        code, writes, out = self.call(["claim", "A", "--by", "me"], item(claimed_by="other"))
+        self.assertEqual((code, writes), (1, []))
+        self.assertIn("claimed by other", out["error"])
+
+    def test_a_claim_lost_to_a_simultaneous_one_fails(self):
+        code, writes, out = self.call(["claim", "A", "--by", "me"], holder_after="other")
+        self.assertEqual((code, len(writes)), (1, 1))
+        self.assertIn("other at the same time", out["error"])
+
+    def test_the_claimant_defaults_to_sheriff_agent_then_the_gh_login(self):
+        self.assertEqual(self.call(["claim", "A"], env={"SHERIFF_AGENT": "me"}, login="person")[2]["claimed_by"], "me")
+        self.assertEqual(self.call(["claim", "A"], login="me")[2]["claimed_by"], "me")
+        code, writes, out = self.call(["claim", "A"])
+        self.assertEqual((code, writes), (1, []))
+        self.assertIn("--by", out["error"])
+
+    def test_closed_tasks_and_repositories_without_the_field_are_refused(self):
+        self.assertEqual(self.call(["claim", "A", "--by", "me"], item(is_open=False, reason="COMPLETED"))[:2], (1, []))
+        code, writes, out = self.call(["claim", "A", "--by", "me"], known=dict(KNOWN, claim=None))
+        self.assertEqual((code, writes), (1, []))
+        self.assertIn("no issue field Claimed by: run gh sheriff install", out["error"])
+
+    def test_the_holder_releases_and_others_need_force(self):
+        code, writes, out = self.call(["release", "A", "--by", "me"], item(claimed_by="me"))
+        self.assertEqual((code, writes, out["released"]), (0, [{"issue": "N1", "fields": [{"fieldId": "F4", "delete": True}]}], "me"))
+        code, writes, out = self.call(["release", "A", "--by", "me"], item(claimed_by="other"))
+        self.assertEqual((code, writes), (1, []))
+        self.assertIn("--force", out["error"])
+        self.assertEqual(len(self.call(["release", "A", "--force"], item(claimed_by="other"))[1]), 1)
+
+    def test_releasing_an_unclaimed_task_writes_nothing(self):
+        self.assertEqual(self.call(["release", "A"], item())[:2], (0, []))
+
+
+class SchemaTest(unittest.TestCase):
+    def test_the_claim_field_is_optional_so_installs_from_before_claims_keep_working(self):
+        fields = [{"id": "F" + name, "name": name} for name in ("Stage", "Verify by", "Next action")]
+        data = {"rateLimit": {"remaining": 10}, "repository": {"id": "R", "issueTypes": {"nodes": []}, "issueFields": {"nodes": fields}}}
+        with mock.patch.object(work, "gql", lambda query, variables=None: data):
+            known = work.schema()
+            self.assertEqual((known["missing"], known["claim"]), ([], None))
+            data["repository"]["issueFields"]["nodes"].append({"id": "FC", "name": "Claimed by"})
+            self.assertEqual(work.schema()["claim"]["id"], "FC")
+
+
 class LookupTest(unittest.TestCase):
     def test_a_number_reads_that_issue(self):
         node = ItemTest().node()
@@ -595,7 +679,8 @@ class WiringTest(unittest.TestCase):
     def test_every_command_parses_with_a_repository(self):
         parser = work.add_commands(argparse.ArgumentParser())
         for argv in (["new", "T", "--repo", "o/r"], ["set", "#3", "--stage", "Parked"], ["verify", "A", "--evidence-file", "-"],
-                     ["status", "--json"], ["reply", "A", "--body-file", "-"], ["sync", "--apply", "--pages", "2"]):
+                     ["status", "--json"], ["reply", "A", "--body-file", "-"], ["sync", "--apply", "--pages", "2"],
+                     ["claim", "A", "--by", "x"], ["release", "#3", "--force"]):
             with self.subTest(argv=argv):
                 self.assertEqual(parser.parse_args(argv).task_command, argv[0])
 

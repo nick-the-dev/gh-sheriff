@@ -47,7 +47,8 @@ PLAN_SPEC.loader.exec_module(PLAN)
 GATE_SPEC = importlib.util.spec_from_file_location("sheriff_gate", HOME / "scripts" / "gate-status.py")
 GATE = importlib.util.module_from_spec(GATE_SPEC)
 GATE_SPEC.loader.exec_module(GATE)
-FIELD_SPECS = (("Stage", "SINGLE_SELECT", WORK.STAGES), ("Verify by", "SINGLE_SELECT", WORK.VERIFY), ("Next action", "TEXT", ()))
+FIELD_SPECS = (("Stage", "SINGLE_SELECT", WORK.STAGES), ("Verify by", "SINGLE_SELECT", WORK.VERIFY), ("Next action", "TEXT", ()),
+               (WORK.CLAIM_FIELD, "TEXT", ()))
 FIELD_TYPES = {"SINGLE_SELECT": "IssueFieldSingleSelect", "TEXT": "IssueFieldText"}
 OPTION_COLORS = ("GRAY", "BLUE", "PURPLE", "YELLOW", "GREEN", "RED")
 VIEWS_API_VERSION = "2026-03-10"
@@ -836,7 +837,7 @@ def ensure_issue_fields(info):
     for line in problems:
         say("!!  " + line)
     if not problems:
-        say("ok  issue fields Stage, Verify by and Next action exist for " + info["owner"])
+        say("ok  issue fields " + ", ".join(name for name, _, _ in FIELD_SPECS) + " exist for " + info["owner"])
     return repository
 
 
@@ -898,7 +899,7 @@ def ensure_views(info, repository, project, fields, existing):
         say("!!  the project has no Stage field, so its views are not created")
         return
     decision = "type:Decision" if "Decision" in {node.get("name") for node in repository["issueTypes"]["nodes"]} else "label:" + WORK.DECISION_LABEL
-    visible = [fields[name]["databaseId"] for name in ("Title", "Assignees", "Stage", "Verify by", "Next action", "Linked pull requests") if name in fields]
+    visible = [fields[name]["databaseId"] for name in ("Title", "Assignees", "Stage", "Verify by", "Next action", WORK.CLAIM_FIELD, "Linked pull requests") if name in fields]
     for name, layout, query, grouping in view_specs(fields["Stage"]["databaseId"], decision):
         if name in existing:
             continue

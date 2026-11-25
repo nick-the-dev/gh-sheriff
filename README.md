@@ -122,7 +122,7 @@ gh sheriff doctor --repo owner/name
 5. Turns on auto-merge and creates a ruleset named `Sheriff` on the default branch. It requires a pull request,
    `Review` and `Merge gate`, and every review thread resolved, and it blocks deletion and force-pushes. Your existing
    required checks are kept.
-6. Adds three issue fields to your account and a Projects board named `<repo> work` (skip with `--no-work-state`).
+6. Adds four issue fields to your account and a Projects board named `<repo> work` (skip with `--no-work-state`).
 
 ## Updates
 
@@ -181,7 +181,7 @@ recommendation. Sheriff then labels the issue `sheriff:needs-decision` and posts
 author, or the logins in `SHERIFF_DECIDERS`, with the question. A reply from an admin, a maintainer or one of those
 logins on the labelled issue is the answer: Sheriff writes the next plan from it and removes the label once no
 question is left. Replies count against the plan budget like a replan. The review blocks a pull request that builds a
-plan whose question is still open, and your agents should skip labelled issues. Workflow files from before 1.1.0 do
+plan whose question is still open, and your agents should skip labelled issues ([Picking work](#picking-work)). Workflow files from before 1.1.0 do
 not start on replies; run `gh sheriff install` again, or comment `/sheriff replan <your answer>`.
 
 **Pictures.** Images attached to the issue or to a trusted comment (GitHub attachments only, at most 10, 5 MB each,
@@ -280,7 +280,7 @@ permissions:
 |---|---|
 | Contents: read and write | Push branches |
 | Pull requests: read and write | Open pull requests, turn on auto-merge, read Sheriff's review |
-| Issues: read and write | Comment on task issues and reply to people |
+| Issues: read and write | Comment on task issues, reply to people and claim tasks |
 | Checks: read | Read the `Review` check run and why it failed; without it an agent can't see Sheriff's verdict |
 | Commit statuses: read | Read `Merge gate` and why it is pending |
 | Actions: read and write | Read CI logs, and re-run a flaky job instead of pushing an empty commit |
@@ -318,7 +318,9 @@ cost, and exits with an error when the share of tokens without cache reads is ab
 | `gh sheriff task new "<title>"` | Create a task issue at Stage Candidate and add it to the board. Flags: `--id`, `--type`, `--verify` (default Live check), `--body-file`, `--project` |
 | `gh sheriff task set <ID>` | Set fields Sheriff can't infer: `--stage Parked`, `--next "..."`, `--verify` |
 | `gh sheriff task verify <ID> --evidence-file F` | Record what was checked in production; sets Verified and closes the issue |
-| `gh sheriff task status` | List open tasks by stage, blocked tasks, and comments waiting for a reply |
+| `gh sheriff task claim <ID>` | Record who works on a task before the work starts; exits 1 if someone else holds it. Flags: `--by` (default `SHERIFF_AGENT`, else your gh login) |
+| `gh sheriff task release <ID>` | Clear a task's claim. Flags: `--by`, `--force` (someone else's claim) |
+| `gh sheriff task status` | List open tasks by stage, ready and blocked tasks, and comments waiting for a reply (`--json` for agents) |
 | `gh sheriff task sync [--apply]` | Move each task's `Stage` from pull request and release facts, which CI runs (a dry run without `--apply`; `--task`, `--pages`) |
 | `gh sheriff task board-status [--apply]` | Set the board's built-in `Status` to each item's `Stage` where they differ (a dry run without `--apply`; `--project`) |
 | `gh sheriff task reply <ID> --body-file F` | Reply to a person's comment on an issue |
@@ -389,13 +391,14 @@ request branch cannot read them on any runner.
 Each task is an issue whose title starts with an ID, like `LOGIN-FIX: fix the login page`. A pull request belongs to the
 task when its title ends with `(LOGIN-FIX)` or its branch is named like `ai/LOGIN-FIX`.
 
-Sheriff stores the task state in three issue fields, which also appear as board columns:
+Sheriff stores the task state in four issue fields, which also appear as board columns:
 
 | Field | Values |
 |---|---|
 | `Stage` | Candidate, In progress, Merged, Released, Verified, Parked |
 | `Verify by` | Release only, Live check, Awaits event |
 | `Next action` | Free text: who does what next |
+| `Claimed by` | Free text: who works on the task ([Picking work](#picking-work)) |
 
 Sheriff updates `Stage` on its own:
 
@@ -416,6 +419,34 @@ The board's built-in `Status` mirrors `Stage` only when a `gh` login with Projec
 page for you.
 
 Board views: Needs human, Blocked, Ready, In flight, Awaiting verification, All open by stage.
+
+### Picking work
+
+Until a task's pull request opens, nothing shows that someone has started it, so two agents could start the same task.
+An agent claims the task first, then branches:
+
+```sh
+gh sheriff task status --json | jq '.ready'   # tasks free to start
+gh sheriff task claim LOGIN-FIX               # exits 1 if someone else holds it: pick another
+git switch -c ai/LOGIN-FIX                    # then push and open the pull request
+```
+
+- `ready` lists Candidates that are not blocked, not claimed and not labelled `sheriff:needs-decision`. The board's
+  Ready view doesn't hide claimed tasks; agents should pick from `ready`.
+- `claim` writes the claimant into `Claimed by`. It is refused when someone else holds the task, and changes nothing
+  when you already do, so run it again before you push: it succeeds only while the task is still yours.
+- The claimant is `--by`, else `SHERIFF_AGENT`, else your gh login. An agent that acts as a GitHub App has no login,
+  and agents sharing one login count as one claimant, so give each agent its own `SHERIFF_AGENT`.
+- Every item in `status --json` carries `claimed_by`, so a dispatcher can list its own work and leave other owners'
+  tasks and pull requests alone: `jq --arg me "$SHERIFF_AGENT" '[.stages[][] | select(.claimed_by == $me)]'`.
+  `status` without `--json` shows `[claimed by ...]`.
+- `release` clears your claim and `--force` clears anyone's. Release a task you give up; if its pull request already
+  moved it on, also `task set <ID> --stage Candidate`.
+- A claim stays when the pull request merges or the issue closes, as a record of who did the task. Claims don't
+  expire: a stuck one shows in `status`, and `release --force` clears it.
+- GitHub can't make the claim atomic. `claim` writes, waits 3 seconds, reads the field back and fails if another name
+  is there, so of two agents claiming at once one wins. Both can still win if the second one's read and write are more
+  than 3 seconds apart; claiming again before pushing catches that.
 
 ## Security
 
